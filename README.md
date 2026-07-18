@@ -65,69 +65,103 @@ probabilities is given to the agent.
 ## The MDP
 
 We model the heist as a finite Markov Decision Process
-$\langle \mathcal{S}, \mathcal{A}, P, R, \gamma \rangle$.
+$$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma, \rho_0 \rangle,$$
+with state space $\mathcal{S}$, action space $\mathcal{A}$, transition kernel
+$P(s' \mid s, a)$, reward function $R(s, a, s')$, discount $\gamma \in (0,1)$,
+and initial-state distribution $\rho_0$.
 
-### States $\mathcal{S}$
+Fix the grid side $N = 5$, the surplus cap $u_{\max} = 8$, and a **static** value
+map $V : \{0,\dots,N-1\}^2 \to \{0,1,2\}$ giving the divertible energy of each
+cell. The start cell $s_{\text{start}} = (0,0)$, the exit cell
+$e = (N-1, N-1)$, and $V$ are fixed for the whole run.
 
-A state is the pair
-$$s = (\text{pos}, u), \qquad \text{pos} \in \{0,\dots,N-1\}^2, \quad u \in \{0,\dots,u_{\max}\},$$
-where $\text{pos}$ is the thief's grid cell and $u$ is the current **unbanked
-surplus**. With grid size $N=5$ and $u_{\max}=8$, the state is encoded as a
-single integer
-$$s = (\text{row} \cdot N + \text{col}) \cdot (u_{\max}+1) + u,$$
-giving $|\mathcal{S}| = N^2 \cdot (u_{\max}+1) = 25 \cdot 9 = 225$ states. The
-start cell $(0,0)$, exit cell $(N-1, N-1)$, and the value map are **fixed for
-the whole run**, so every state can be visited enough for a table to converge.
+### State space $\mathcal{S}$
 
-### Actions $\mathcal{A}$
+A state is a position–surplus pair, encoded as a single integer (as in the
+lecture notebooks):
+$$s = (r, c, u), \qquad (r,c) \in \{0,\dots,N-1\}^2, \quad u \in \{0,\dots,u_{\max}\},$$
+$$\mathcal{S} \;\cong\; \{0, 1, \dots, N^2(u_{\max}+1) - 1\}, \qquad
+\operatorname{id}(s) = (r N + c)(u_{\max}+1) + u,$$
+so $|\mathcal{S}| = N^2 (u_{\max}+1) = 25 \cdot 9 = 225$. The **terminal** states
+are those on the exit cell, $\mathcal{S}_{\text{term}} = \{(r,c,u) : (r,c) = e\}$.
+The initial distribution is deterministic:
+$\rho_0(s) = \mathbb{1}[\,s = (0,0,0)\,]$.
 
-Six discrete actions, $|\mathcal{A}| = 6$:
+### Action space $\mathcal{A}$
 
-| id | action | effect |
-|----|--------|--------|
-| 0–3 | `up, down, left, right` | move one cell (clamped at the walls) |
-| 4 | `siphon-low` | steal $v$, alarm probability $p_{\text{low}} = 0.05$ |
-| 5 | `siphon-high` | steal $2v$, alarm probability $p_{\text{high}} = 0.20$ |
+$$\mathcal{A} = \{0,1,2,3,4,5\} = \{\uparrow,\downarrow,\leftarrow,\rightarrow,\ \textsf{siphon-low},\ \textsf{siphon-high}\}.$$
+Moves have displacement $\delta_a \in \{(-1,0),(1,0),(0,-1),(0,1)\}$; the two
+siphons carry a haul multiplier $k_a$ and an alarm probability $p_a$:
+$$k_{\textsf{low}} = 1,\ p_{\textsf{low}} = 0.05, \qquad
+k_{\textsf{high}} = 2,\ p_{\textsf{high}} = 0.20.$$
 
-where $v$ is the value of the current cell (0 if the cell is empty).
+### Transition kernel $P$
 
-### Transitions $P$ and Reward $R$
+The dynamics are deterministic except for the alarm on a siphon. Let
+$v = V(r,c)$ be the current cell value.
 
-The dynamics are stochastic only through the alarm. Writing $u'$ for the next
-surplus:
+**Move** $a \in \{\uparrow,\downarrow,\leftarrow,\rightarrow\}$ — deterministic;
+position clamps at the walls, surplus is unchanged:
+$$(r',c') = \operatorname{clip}\big((r,c) + \delta_a,\ 0,\ N-1\big), \qquad
+P\big((r',c',u) \mid (r,c,u), a\big) = 1.$$
 
-- **Move:** deterministic; position updates, $u' = u$, reward $R = 0$.
-- **Siphon** on a cell with value $v > 0$:
-  - with probability $p$ → **alarm**: $u' = 0$ and $R = -\rho$
-    (penalty $\rho = 2.0$);
-  - otherwise → $u' = \min(u + kv,\; u_{\max})$ and $R = 0$
-    ($k=1$ for low, $k=2$ for high).
-- **Reach the exit** (cash out, *terminal*): $R = +u$, then $u' = 0$.
-- The episode **truncates** after $T = 50$ steps.
+**Siphon** $a \in \{\textsf{low}, \textsf{high}\}$ — position unchanged; on an
+empty cell ($v = 0$) it is a no-op, otherwise the alarm fires with probability
+$p_a$:
+$$
+P\big(s' \mid (r,c,u), a\big) =
+\begin{cases}
+1, & v = 0,\ s' = (r,c,u) \\[2pt]
+p_a, & v > 0,\ s' = (r,c,\,0) \quad (\text{alarm}) \\[2pt]
+1 - p_a, & v > 0,\ s' = \big(r,c,\ \min(u + k_a v,\ u_{\max})\big).
+\end{cases}
+$$
 
-The tension is entirely in the reward: surplus is only worth points once banked
-at the exit, and `siphon-high` trades a larger haul for a $4\times$ higher risk
-of losing everything.
+### Reward $R$
+
+Reward is zero everywhere except at the two decisive events — cashing out at the
+exit, and tripping the alarm (penalty $\rho = 2.0$):
+$$
+R(s, a, s') =
+\begin{cases}
++u, & a \text{ is a move and } (r',c') = e \quad (\text{cash out}) \\[2pt]
+-\rho, & a \text{ is a siphon and the alarm fires} \\[2pt]
+0, & \text{otherwise.}
+\end{cases}
+$$
+The tension is entirely here: surplus is worthless until banked at the exit, and
+`siphon-high` trades a doubled haul for a $4\times$ higher chance of losing it
+all. The episode ends when a terminal state is reached, or **truncates** after
+$T = 50$ steps (a time limit, not part of $P$).
 
 ### Objective
 
-The agent maximizes the expected discounted return
-$$G_t = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1}, \qquad \gamma = 0.99,$$
-i.e. it learns the optimal action-value function
-$Q^*(s,a) = \max_\pi \mathbb{E}_\pi[G_t \mid S_t = s, A_t = a]$.
+The agent seeks a policy $\pi$ maximizing the expected $\gamma$-discounted return
+($\gamma = 0.99$)
+$$G_t = \sum_{k=0}^{\infty} \gamma^k R_{t+k+1},$$
+equivalently the optimal action-value function
+$$q_\star(s,a) = \max_\pi \mathbb{E}_\pi\!\left[ G_t \mid S_t = s,\ A_t = a \right],$$
+which satisfies the Bellman optimality equation
+$$q_\star(s,a) = \sum_{s'} P(s' \mid s, a)\Big[\, R(s,a,s') + \gamma \max_{a'} q_\star(s', a') \,\Big].$$
+Knowing $q_\star$ is enough to act optimally, since the greedy policy is optimal:
+$\pi_\star(s) \in \arg\max_a q_\star(s,a)$.
 
 ---
 
 ## Tabular Q-Learning
 
-Off-policy TD control. We keep a table $Q(s,a)$ and, after every transition
-$(S, A, R, S')$, move it toward the bootstrapped greedy target:
+Off-policy TD control: learn $q_\star$ directly from experience, without knowing
+$P$. We keep a table $Q(s,a)$ and, after each observed transition
+$(S_t, A_t, R_{t+1}, S_{t+1})$, replace the expectation in the Bellman optimality
+equation by its one-sample estimate and take a step toward it:
 
-$$Q(S, A) \leftarrow Q(S, A) + \alpha \Big[\, R + \gamma \max_{a} Q(S', a) - Q(S, A) \,\Big].$$
+$$Q(S_t, A_t) \leftarrow Q(S_t, A_t) + \alpha \Big[\, \underbrace{R_{t+1} + \gamma \max_{a} Q(S_{t+1}, a)}_{\text{TD target}} - Q(S_t, A_t) \,\Big].$$
 
-On a terminal transition there is no future return, so the target is just $R$.
-Exploration uses an $\varepsilon$-greedy policy with $\varepsilon$ annealed
-between episodes.
+It is *off-policy* because the target bootstraps on $\max_a Q(S_{t+1}, a)$ — the
+greedy value — regardless of the (exploratory) action actually taken next. On a
+terminal transition there is no future return, so the target is just $R_{t+1}$.
+Behaviour is $\varepsilon$-greedy with $\varepsilon$ annealed between episodes,
+so exploration gives way to exploitation as the estimates improve.
 
 ### Pseudocode
 
