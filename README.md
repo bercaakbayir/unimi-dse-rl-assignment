@@ -17,6 +17,36 @@ This README documents **Level 1**: the MDP and the tabular Q-learning algorithm.
 
 ---
 
+## The Scenario
+
+A thief has broken into the control room of a city power grid. Each cell of the
+grid holds a fixed amount of divertible energy; standing on a rich cell, the
+thief can **siphon** power into a portable battery — the *unbanked surplus*.
+Stolen energy is worthless while it sits in the battery: the only way to score
+is to carry it to the **exit** (a black-market drop point) and **cash out**.
+
+The catch is a **monitoring system**. Every siphon has a chance of tripping an
+**alarm**; when it does, security locks the grid down and the thief loses the
+entire battery — the accumulated surplus is wiped and a penalty is incurred.
+Siphoning harder (`siphon-high`) steals twice as much per step but is four times
+more likely to trip the alarm. And the clock is running: after a fixed number of
+steps the heist ends whether or not the thief has cashed out.
+
+So the thief faces a sequence of coupled decisions under uncertainty:
+
+- **Where to steal** — which rich cells are worth the detour from the exit.
+- **How aggressively** — the greedy `siphon-high` vs the safer `siphon-low`.
+- **When to stop and run** — bank a modest, safe haul now, or gamble on a bigger
+  one and risk losing everything to the alarm.
+
+There is no single "right" move; the value of an action depends on the surplus
+already at risk and the distance still to travel. This is exactly a **sequential
+decision problem under uncertainty**, which we formalize as a Markov Decision
+Process and solve by learning from experience — no model of the alarm
+probabilities is given to the agent.
+
+---
+
 ## The MDP
 
 We model the heist as a finite Markov Decision Process
