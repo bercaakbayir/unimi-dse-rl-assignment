@@ -70,8 +70,8 @@ class GridThiefEnvL3(_Base):
 
     def __init__(
         self,
-        n_consumers: int = 8,
-        n_substations: int = 2,
+        n_consumers: int = 9,
+        n_substations: int = 3,
         max_steps: int = 50,
         surplus_cap: float = 10.0,
         base_sens: float = 0.05,
