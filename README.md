@@ -33,84 +33,66 @@ The other levels and algorithms are added as the project progresses.
 
 ## The Scenario
 
-The agent is an energy thief operating on a **power-grid network** — nodes are
-plants, substations, and consumers, joined by transmission **edges** that carry
-energy. Where supply and demand don't quite match, an edge carries exploitable
-slack. The thief **taps** an edge to divert energy into an *unbanked surplus*,
-then **secures** (banks) that surplus as reward.
+The agent is an energy thief on a **power-grid network**: a **plant** generates
+energy that flows through a **substation** out to several **consumers**. Because
+generation never matches demand exactly, some edges carry more than their consumer
+needs — that excess is **slack** (the grid's inefficiency).
 
-The catch is a **monitoring system**. Every tap risks tripping an **alarm**, and
-the probability grows with **how aggressively** the thief operates (a high-intensity
-tap on a juicy line) and with the current **grid load** (a busy grid is watched
-more closely). When the alarm fires, the entire unbanked surplus is wiped and a
-penalty is incurred.
+The thief steals by **redirecting flow** off an edge into an *unbanked surplus*:
 
-So the thief faces a sequence of coupled decisions under uncertainty:
+- **skim** an edge — divert only its slack (the waste). No consumer goes short, so
+  detection risk is low;
+- **overdraw** an edge — take the slack *plus* some delivered demand, starving the
+  consumer. Bigger haul, but the shortfall is conspicuous, so the **monitoring
+  system** is far likelier to raise an **alarm**;
+- **secure** — bank part of the surplus as reward.
 
-- **Which line to tap** — the safe trickle or the juicy, closely-watched one.
-- **How aggressively** — a bigger haul now vs. a higher chance of losing it.
-- **Tap or bank** — keep stealing while the grid is quiet, or secure the surplus
-  before the load rises and an alarm wipes it.
-
-There is no single "right" move; the value of an action depends on the load and
-the surplus currently at risk. This is a **sequential decision problem under
-uncertainty**, formalized as a Markov Decision Process and solved by learning
-from experience — no model of the alarm probabilities is given to the agent.
+An alarm wipes the unbanked surplus and costs a penalty. The grid cycles through
+discrete **demand phases**; each phase fixes the flow and slack on every edge and
+the monitoring sensitivity, so *where* it is worth redirecting flow — and how tight
+the grid is — changes over time. No model of the alarm probabilities is given to
+the agent; it learns from experience.
 
 ---
 
 ## The MDP
 
 We model the heist as a finite Markov Decision Process
-$$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma, \rho_0 \rangle,$$
-with state space $\mathcal{S}$, action space $\mathcal{A}$, transition kernel
-$P(s' \mid s, a)$, reward function $R(s, a, s')$, discount $\gamma \in (0,1)$,
-and initial-state distribution $\rho_0$.
-
-The grid is a small fixed network with tappable edges $\mathcal{E}$; each edge
-$e$ has a base haul $g_e$ and a base alarm risk $r_e$ (default: edge A a safe
-trickle $(1, 0.03)$, edge B juicier but watched $(2, 0.08)$). A grid **load** $L$
-scales the monitoring sensitivity via a per-load multiplier $\rho(L)$.
+$$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, P, R, \gamma, \rho_0 \rangle.$$
+The grid is a plant → substation → $n$ consumers. Each consumer edge $c$ carries a
+flow $f_c$ with divertible slack $s_c$, and a **demand phase** $\phi$ fixes the flows,
+slacks, and monitoring sensitivity $\varsigma(\phi)$ (higher phase = tighter grid,
+less slack, closer watch).
 
 ### State space $\mathcal{S}$
 
-The agent does not move in space; the state is the current grid load and the
-unbanked surplus, encoded as a single integer:
-$$s = (L, U), \qquad L \in \{0,\dots,n_L-1\}, \quad U \in \{0,\dots,U_{\max}\},$$
-$$\mathcal{S} \;\cong\; \{0, 1, \dots, n_L(U_{\max}+1) - 1\}, \qquad
-\operatorname{id}(s) = L\,(U_{\max}+1) + U,$$
-so $|\mathcal{S}| = n_L (U_{\max}+1) = 4 \cdot 9 = 36$. There is **no terminal
-state** (fixed-horizon continuing task); $\rho_0$ is deterministic at
-$(L,U) = (0,0)$.
+Slack is a deterministic function of the demand phase, so the state is just the phase
+and the unbanked surplus:
+$$s = (\phi, U), \qquad \phi \in \{0,\dots,n_\phi-1\}, \quad U \in \{0,\dots,U_{\max}\},$$
+$$\operatorname{id}(s) = \phi\,(U_{\max}+1) + U, \qquad |\mathcal{S}| = n_\phi(U_{\max}+1) = 4 \cdot 9 = 36.$$
+No terminal state (fixed-horizon continuing task); $\rho_0$ deterministic at $(\phi,U)=(0,0)$.
 
 ### Action space $\mathcal{A}$
 
-Tap each edge at low or high intensity, or secure:
-$$\mathcal{A} = \{\textsf{tap-}e\textsf{-low},\ \textsf{tap-}e\textsf{-high} : e \in \mathcal{E}\} \cup \{\textsf{secure}\}, \qquad |\mathcal{A}| = 2|\mathcal{E}| + 1 = 5.$$
-A **high** tap multiplies both haul and risk — the "aggressiveness" — by
-$\kappa_g = 2$ and $\kappa_r = 2.5$ respectively.
+Skim or overdraw each consumer edge, or secure:
+$$\mathcal{A} = \{\textsf{skim-}c,\ \textsf{overdraw-}c : c \in \text{consumers}\} \cup \{\textsf{secure}\}, \qquad |\mathcal{A}| = 2n + 1 = 7.$$
 
 ### Transition kernel $P$
 
-The load drifts on its own via an exogenous random walk, independent of the
-action:
-$$L' = \operatorname{clip}(L + \xi,\ 0,\ n_L-1), \qquad \xi \in \{-1,0,+1\}\ \text{w.p.}\ (0.25, 0.5, 0.25).$$
-A **tap** on edge $e$ at intensity $k \in \{\text{low}, \text{high}\}$ trips the
-alarm with probability increasing in aggressiveness and load; otherwise it adds
-to the surplus:
-$$
-U' =
-\begin{cases}
-0, & \text{w.p. } p = \min\!\big(1,\ r_e\,\kappa_r^{[k=\text{high}]}\,\rho(L)\big) \quad (\text{alarm}) \\[2pt]
-\min\!\big(U + g_e\,\kappa_g^{[k=\text{high}]},\ U_{\max}\big), & \text{otherwise.}
-\end{cases}
-$$
-A **secure** action banks $b = \min(U, B)$ (bank rate $B = 4$): $U' = U - b$.
+The demand phase drifts by an exogenous random walk
+$\phi' = \operatorname{clip}(\phi + \xi)$, $\xi \in \{-1,0,+1\}$ w.p. $(0.25,0.5,0.25)$.
+A tap on edge $c$ diverts $\text{steal}$ energy (skim: $s_c$; overdraw: $s_c + \Delta$,
+capped at the flow), causing a delivered-demand **shortfall** $h = \max(0, \text{steal}-s_c)$.
+The alarm fires with
+$$p = \min\!\big(1,\ \varsigma(\phi)\,(\beta_0 + \beta_h\,h)\big),$$
+so skimming waste ($h=0$) is cheap and overdrawing (a visible shortfall) is
+conspicuous, and a tighter grid (higher $\varsigma$) is riskier throughout. On an
+alarm $U \to 0$; otherwise the haul is added, $U' = \min(U + \text{steal}, U_{\max})$.
+A **secure** banks $b = \min(U, B)$ (bank rate $B=4$): $U' = U - b$.
 
 ### Reward $R$
 
-Zero except when banking energy (secure) or tripping the alarm (penalty
-$\varrho = 2.0$):
+Zero except when banking energy (secure) or tripping the alarm (penalty $\varrho = 2.0$):
 $$
 R(s, a, s') =
 \begin{cases}
@@ -120,10 +102,9 @@ R(s, a, s') =
 \end{cases}
 $$
 The tension: surplus is worthless until secured, and an alarm wipes whatever is
-unbanked — so the thief must read the load, tap while the grid is quiet, and bank
-before pushing its luck. The episode **truncates** after $T = 50$ steps (a fixed
-horizon; there is no terminal state, so the agent bootstraps on truncation and
-relies on $\gamma < 1$).
+unbanked — so the thief **skims the highest-slack edge while the grid is loose** and
+**secures / backs off** when it tightens. The episode **truncates** after $T = 50$
+steps (no terminal state; bootstrap on truncation, $\gamma < 1$).
 
 ### Objective
 
@@ -184,9 +165,10 @@ Loop for each episode:
 | $\varepsilon$ | exploration (start → min) | $1.0 \to 0.05$ |
 | $\varepsilon_{\text{decay}}$ | per-episode decay | $0.999$ |
 
-Trained over 5 seeds × 8 000 episodes, the greedy policy **beats** the hand-coded
-heuristic: mean greedy return $\approx +56$ (Q-learning) vs $\approx +38$
-(heuristic) vs $\approx +11$ (random).
+Trained over 5 seeds × 8 000 episodes, the greedy policy reaches a mean return
+$\approx +54$, and the learned policy is legible: it **skims the consumer edge with
+the most slack in each demand phase**, and secures / backs off when the grid
+tightens (little slack, high sensitivity).
 
 ---
 
@@ -194,10 +176,12 @@ heuristic: mean greedy return $\approx +56$ (Q-learning) vs $\approx +38$
 
 ```
 energy_thief/
-  envs/grid_thief.py      # GridThiefEnv — the L1 power-grid network MDP
+  envs/grid_thief.py      # GridThiefEnv   — L1 power-grid network MDP (36 states)
+  envs/grid_thief_l2.py   # GridThiefEnvL2 — L2 medium network + adaptive suspicion (26k states)
   agents/q_learning.py    # QLearningAgent — tabular off-policy TD control
 notebooks/
-  01_level1_tabular.ipynb # L1 experiments: training, curves, baselines, policy
+  level-1.ipynb           # L1: training, learning + eval curves, ε schedule, policy, timeline
+  level-2.ipynb           # L2: same + state-coverage (curse of dimensionality), suspicion timeline
 scripts/
   sanity_check_env.py     # random + heuristic plumbing check
 ```

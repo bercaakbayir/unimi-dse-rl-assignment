@@ -1,32 +1,34 @@
-"""Energy Thief environment -- Level 1 (small power-grid network, tabular).
+"""Energy Thief environment -- Level 1 (small power-grid network with flows).
 
-Level 1 of the VFA-4 "Energy Thief" project. The agent taps energy from the
-transmission lines of a small power grid, building up an (unbanked) *surplus*
-that it must *secure* before the grid's monitoring system raises an alarm and
-wipes it.
+Level 1 of the VFA-4 "Energy Thief" project. The grid is a real network of nodes
+-- a **plant** (source), a **substation**, and several **consumers** (sinks) --
+joined by transmission edges that carry **energy flows** from the plant out to the
+consumers. Because generation and demand never match exactly, some edges carry
+more than their consumer needs: that excess is **slack** (the grid's inefficiency).
 
-Following the project brief, the grid is a small network of nodes (a plant, a
-substation, consumers) joined by tappable transmission *edges*. The agent does
-not move in space; at each step it decides *how* to operate:
+The thief steals by **redirecting flow** off an edge into an unbanked *surplus*:
 
-* tap an edge at low or high intensity -- diverting energy into the surplus, at
-  an alarm probability that grows with how aggressively it operates and with
-  the current grid *load* (a busy grid is watched more closely);
-* or *secure* part of the surplus, banking it safely as reward.
+* **skim** an edge -- divert only its slack (the waste). No consumer goes short,
+  so detection risk is low;
+* **overdraw** an edge -- divert the slack *and* dip into the delivered demand,
+  starving the consumer downstream. Bigger haul, but the shortfall is conspicuous,
+  so the monitoring system is far likelier to raise an **alarm**;
+* **secure** -- bank part of the surplus as reward.
 
-Level 1 is deliberately small so a **tabular** agent can solve it: the state is
-just the discrete grid load and the discrete unbanked surplus, and the alarm
-probability depends only on the current action and load -- there is no per-edge
-suspicion history. That adaptive "heat" mechanic arrives in Level 2, where it
-blows up the state space and motivates function approximation.
+An alarm wipes the unbanked surplus and costs a penalty. The grid cycles through
+discrete **demand phases** (an exogenous random walk); each phase fixes the flow
+and slack on every edge and the monitoring sensitivity, so which edge is worth
+skimming -- and how tight the grid is -- changes over time.
+
+Level 1 is small enough for a **tabular** agent: the slack on every edge is a
+deterministic function of the current demand phase, so the state is just
+(demand phase, surplus).
 
 MDP summary
 -----------
-State   : (grid load L in {0..n_load-1}, unbanked surplus U in {0..surplus_max})
-Actions : tap each edge at low / high intensity, or secure (bank) the surplus.
-Reward  : +banked energy on a secure action;
-          -alarm_penalty when an alarm fires (and U is reset to 0);
-          0 otherwise.
+State   : (demand phase P in {0..n_phase-1}, unbanked surplus U in {0..surplus_max})
+Actions : skim / overdraw each consumer's edge, or secure (bank) the surplus.
+Reward  : +banked energy on secure; -alarm_penalty on an alarm (U reset); else 0.
 Horizon : fixed; the episode truncates after ``max_steps`` steps.
 """
 
@@ -36,160 +38,171 @@ from typing import Any, Optional
 
 import numpy as np
 
-try:  # gymnasium is the standard interface; fall back gracefully if absent.
+try:
     import gymnasium as gym
     from gymnasium import spaces
     _Base = gym.Env
-except ModuleNotFoundError:  # pragma: no cover - lets the file import bare.
+except ModuleNotFoundError:  # pragma: no cover
     gym = None
     spaces = None
     _Base = object
 
 
-# Default tappable edges as (name, base gain, base alarm risk). Edge A is a safe
-# trickle; edge B is juicier but more closely watched.
-DEFAULT_EDGES = (("A", 1, 0.03), ("B", 2, 0.08))
-
-
-def _build_action_names(edges: tuple) -> list[str]:
+def _build_action_names(consumers: tuple) -> list[str]:
     names: list[str] = []
-    for name, _, _ in edges:
-        names += [f"tap-{name}-low", f"tap-{name}-high"]
+    for c in consumers:
+        names += [f"skim-{c}", f"overdraw-{c}"]
     names.append("secure")
     return names
 
 
-# Module-level names for the default edge layout (index == action id).
-ACTION_NAMES = _build_action_names(DEFAULT_EDGES)
+# Default topology: three consumers fed from one substation.
+DEFAULT_CONSUMERS = ("C1", "C2", "C3")
+ACTION_NAMES = _build_action_names(DEFAULT_CONSUMERS)
 
 
 class GridThiefEnv(_Base):
-    """Level-1 Energy Thief power-grid network.
+    """Level-1 Energy Thief power-grid network with flows and slack.
 
     Parameters
     ----------
-    n_load : int
-        Number of discrete grid-load phases. Load follows an exogenous random
-        walk and scales the alarm probability (busier grid -> closer watch).
-    surplus_max : int
-        Cap on the (integer) unbanked surplus carried by the thief.
-    bank_rate : int
-        Maximum surplus that a single ``secure`` action banks as reward.
-    max_steps : int
-        Episode length before truncation (the task has no terminal state).
-    edges : sequence of (name, gain, risk)
-        Tappable transmission lines. ``gain`` is the energy diverted per low
-        tap; ``risk`` is the base alarm probability per low tap.
-    high_gain_mult, high_risk_mult : float
-        A high-intensity tap multiplies the gain and the risk by these factors.
-    load_risk : sequence of float, optional
-        Alarm-probability multiplier per load phase (length ``n_load``).
+    n_consumers : int
+        Number of consumer nodes (and tappable substation->consumer edges).
+    n_phase : int
+        Number of discrete demand phases (exogenous random walk). Higher phase =
+        tighter grid (less slack, closer monitoring).
+    surplus_max, bank_rate, max_steps : int
+        Surplus cap, energy banked per secure, and episode length.
+    base_waste : int
+        Total slack (overproduction) injected in phase 0; it falls by one per phase.
+    base_sens : float
+        Monitoring sensitivity in phase 0; it scales up with the phase.
+    base_divert : float
+        Detectability of any diversion (the constant term of the alarm model).
+    shortfall_weight : float
+        How strongly a delivered-demand shortfall raises the alarm probability.
+    overdraw_extra : int
+        Extra energy an ``overdraw`` takes beyond the slack (into delivered demand).
     alarm_penalty : float
         Reward subtracted when an alarm fires.
     seed : int, optional
-        Seed for the dynamics RNG (load walk and alarm draws).
+        Seed for the dynamics RNG (phase walk and alarm draws).
     """
 
     metadata = {"render_modes": ["ansi"]}
 
     def __init__(
         self,
-        n_load: int = 4,
+        n_consumers: int = 3,
+        n_phase: int = 4,
         surplus_max: int = 8,
         bank_rate: int = 4,
         max_steps: int = 50,
-        edges: tuple = DEFAULT_EDGES,
-        high_gain_mult: int = 2,
-        high_risk_mult: float = 2.5,
-        load_risk: Optional[tuple] = None,
+        base_waste: int = 4,
+        base_sens: float = 0.04,
+        base_divert: float = 1.0,
+        shortfall_weight: float = 1.5,
+        overdraw_extra: int = 2,
         alarm_penalty: float = 2.0,
         seed: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if n_load < 1:
-            raise ValueError(f"n_load must be >= 1, got {n_load}.")
-        if surplus_max < 1:
-            raise ValueError(f"surplus_max must be >= 1, got {surplus_max}.")
+        if n_consumers < 1 or n_phase < 1 or surplus_max < 1:
+            raise ValueError("n_consumers, n_phase, surplus_max must be >= 1.")
 
-        self.n_load = int(n_load)
+        self.n_consumers = int(n_consumers)
+        self.n_phase = int(n_phase)
         self.surplus_max = int(surplus_max)
         self.bank_rate = int(bank_rate)
         self.max_steps = int(max_steps)
-        self.edges = tuple(edges)
-        self.high_gain_mult = int(high_gain_mult)
-        self.high_risk_mult = float(high_risk_mult)
+        self.base_waste = int(base_waste)
+        self.base_sens = float(base_sens)
+        self.base_divert = float(base_divert)
+        self.shortfall_weight = float(shortfall_weight)
+        self.overdraw_extra = int(overdraw_extra)
         self.alarm_penalty = float(alarm_penalty)
 
-        if load_risk is None:
-            # Rises from calm to busy: stealing on a busy grid is far riskier.
-            load_risk = tuple(0.5 + l for l in range(self.n_load))
-        if len(load_risk) != self.n_load:
-            raise ValueError("load_risk must have length n_load.")
-        self.load_risk = tuple(float(x) for x in load_risk)
-
-        self.action_names = _build_action_names(self.edges)
-        self.n_taps = 2 * len(self.edges)
+        self.consumers = tuple(f"C{i+1}" for i in range(self.n_consumers))
+        self.action_names = _build_action_names(self.consumers)
+        self.n_taps = 2 * self.n_consumers
         self.SECURE = self.n_taps
         self.n_actions = self.n_taps + 1
 
-        self.n_states = self.n_load * (self.surplus_max + 1)
+        # Per-phase flow / slack on each consumer edge, and monitoring sensitivity.
+        self._build_grid()
+
+        self.n_states = self.n_phase * (self.surplus_max + 1)
         if spaces is not None:
             self.observation_space = spaces.Discrete(self.n_states)
             self.action_space = spaces.Discrete(self.n_actions)
 
         self._rng = np.random.default_rng(seed)
 
-        # Episode state (initialised in reset()).
-        self.load: int = 0
+        self.phase: int = 0
         self.surplus: int = 0
         self.t: int = 0
 
     # ------------------------------------------------------------------
-    # Action helpers
+    # Grid layout: flows and slack per phase (deterministic)
     # ------------------------------------------------------------------
-    def tap_action(self, edge_idx: int, high: bool = False) -> int:
-        """Action id for tapping ``edge_idx`` at low/high intensity."""
-        return edge_idx * 2 + (1 if high else 0)
+    def _build_grid(self) -> None:
+        n = self.n_consumers
+        self.demand = np.zeros((self.n_phase, n), dtype=np.int64)
+        self.slack = np.zeros((self.n_phase, n), dtype=np.int64)
+        self.flow = np.zeros((self.n_phase, n), dtype=np.int64)
+        self.sens = np.zeros(self.n_phase)
+        for ph in range(self.n_phase):
+            demands = np.array([1 + ((i + ph) % 3) for i in range(n)])
+            waste = max(0, self.base_waste - ph)          # tighter grid at high phase
+            # Slack pools where demand is low; hand it out one unit at a time.
+            w = (demands.max() - demands + 1).astype(float)
+            alloc = np.zeros(n, dtype=np.int64)
+            for _ in range(waste):
+                j = int(np.argmax(w)); alloc[j] += 1; w[j] -= 1.0
+            self.demand[ph] = demands
+            self.slack[ph] = alloc
+            self.flow[ph] = demands + alloc
+            self.sens[ph] = self.base_sens * (ph + 1)
 
     # ------------------------------------------------------------------
-    # Observation encoding
+    # Action / observation helpers
     # ------------------------------------------------------------------
-    def _encode(self, load: int, surplus: int) -> int:
-        return load * (self.surplus_max + 1) + int(surplus)
+    def tap_action(self, consumer_idx: int, overdraw: bool = False) -> int:
+        return consumer_idx * 2 + (1 if overdraw else 0)
+
+    def _encode(self) -> int:
+        return self.phase * (self.surplus_max + 1) + self.surplus
 
     def decode(self, obs: int) -> tuple[int, int]:
-        """Inverse of :meth:`_encode` -- returns (load, surplus)."""
+        """Inverse of :meth:`_encode` -- returns (demand phase, surplus)."""
         return obs // (self.surplus_max + 1), obs % (self.surplus_max + 1)
 
     def _get_obs(self) -> int:
-        return self._encode(self.load, self.surplus)
+        return self._encode()
 
-    def _info(self, alarm: bool = False, stolen: int = 0, banked: int = 0) -> dict[str, Any]:
+    def _info(self, alarm=False, stolen=0, banked=0, tapped=-1, shortfall=0) -> dict[str, Any]:
         return {
-            "load": self.load,
+            "phase": self.phase,
             "surplus": self.surplus,
             "alarm": alarm,
             "stolen": stolen,
             "banked": banked,
+            "tapped": tapped,       # consumer edge tapped this step, or -1
+            "shortfall": shortfall,  # delivered-demand shortfall caused this step
             "t": self.t,
         }
 
-    def _next_load(self) -> int:
+    def _next_phase(self) -> int:
         step = int(self._rng.choice((-1, 0, 1), p=(0.25, 0.5, 0.25)))
-        return min(self.n_load - 1, max(0, self.load + step))
+        return min(self.n_phase - 1, max(0, self.phase + step))
 
     # ------------------------------------------------------------------
     # Gym API
     # ------------------------------------------------------------------
-    def reset(
-        self,
-        *,
-        seed: Optional[int] = None,
-        options: Optional[dict[str, Any]] = None,
-    ) -> tuple[int, dict[str, Any]]:
+    def reset(self, *, seed: Optional[int] = None, options=None) -> tuple[int, dict[str, Any]]:
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-        self.load = 0
+        self.phase = 0
         self.surplus = 0
         self.t = 0
         return self._get_obs(), self._info()
@@ -202,36 +215,46 @@ class GridThiefEnv(_Base):
         alarm = False
         stolen = 0
         banked = 0
+        tapped = -1
+        shortfall = 0
 
         if action == self.SECURE:
             banked = min(self.surplus, self.bank_rate)
             self.surplus -= banked
             reward = float(banked)
-        else:  # a tap action
-            edge_idx, high = divmod(action, 2)
-            _, gain, base_risk = self.edges[edge_idx]
-            # Alarm probability grows with intensity (aggressiveness) and load.
-            p = base_risk * (self.high_risk_mult if high else 1.0) * self.load_risk[self.load]
-            if self._rng.random() < min(1.0, p):
-                alarm = True
-                self.surplus = 0
-                reward = -self.alarm_penalty
+        else:
+            c, overdraw = divmod(action, 2)
+            tapped = c
+            slack = int(self.slack[self.phase, c])
+            flow = int(self.flow[self.phase, c])
+            if overdraw:
+                steal = min(slack + self.overdraw_extra, flow)  # can't take more than flows
+                shortfall = steal - slack                        # dips into delivered demand
             else:
-                stolen = gain * (self.high_gain_mult if high else 1)
-                stolen = min(stolen, self.surplus_max - self.surplus)
-                self.surplus += stolen
+                steal = slack                                    # skim only the waste
+            # Alarm probability: a base for any diversion plus the shortfall it causes,
+            # scaled by the phase's monitoring sensitivity. Skimming waste (shortfall 0)
+            # is cheap; overdrawing (starving a consumer) is conspicuous.
+            if steal > 0:
+                p = self.sens[self.phase] * (self.base_divert + self.shortfall_weight * shortfall)
+                if self._rng.random() < min(1.0, p):
+                    alarm = True
+                    self.surplus = 0
+                    reward = -self.alarm_penalty
+                else:
+                    stolen = min(steal, self.surplus_max - self.surplus)
+                    self.surplus += stolen
 
-        # Grid load drifts on its own, independent of the agent.
-        self.load = self._next_load()
+        self.phase = self._next_phase()
         self.t += 1
-        # Fixed-horizon task: no terminal state, only truncation on the clock.
         truncated = self.t >= self.max_steps
-
-        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, banked)
+        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, banked, tapped, shortfall)
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
     def render(self) -> str:
-        bar = "#" * (self.load + 1) + "." * (self.n_load - self.load - 1)
-        return f"t={self.t:<3} load=[{bar}] surplus={self.surplus}/{self.surplus_max}"
+        flows = " ".join(f"{self.consumers[i]}:{self.flow[self.phase, i]}"
+                         f"(+{self.slack[self.phase, i]})" for i in range(self.n_consumers))
+        return (f"t={self.t:<3} phase={self.phase} (sens={self.sens[self.phase]:.2f})"
+                f"  surplus={self.surplus}/{self.surplus_max}  flows[{flows}]")
