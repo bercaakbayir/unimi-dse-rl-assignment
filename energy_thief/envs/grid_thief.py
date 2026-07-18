@@ -6,16 +6,20 @@ joined by transmission edges that carry **energy flows** from the plant out to t
 consumers. Because generation and demand never match exactly, some edges carry
 more than their consumer needs: that excess is **slack** (the grid's inefficiency).
 
-The thief steals by **redirecting flow** off an edge into an unbanked *surplus*:
+The thief steals by **redirecting flow** off an edge, accumulating an **unbanked
+surplus** of diverted energy:
 
 * **skim** an edge -- divert only its slack (the waste). No consumer goes short,
   so detection risk is low;
 * **overdraw** an edge -- divert the slack *and* dip into the delivered demand,
-  starving the consumer downstream. Bigger haul, but the shortfall is conspicuous,
-  so the monitoring system is far likelier to raise an **alarm**;
-* **secure** -- bank part of the surplus as reward.
+  starving the consumer. Bigger haul, but the shortfall is conspicuous, so the
+  monitoring system is far likelier to raise an **alarm**;
+* **lie low** -- operate nothing this step, drawing no attention (protects the
+  accumulated surplus).
 
-An alarm wipes the unbanked surplus and costs a penalty. The grid cycles through
+The thief is rewarded for the surplus it holds each step (it benefits from the
+diverted energy while it keeps it); a **triggered alarm resets the accumulated
+surplus** to zero, ending that benefit. The grid cycles through
 discrete **demand phases** (an exogenous random walk); each phase fixes the flow
 and slack on every edge and the monitoring sensitivity, so which edge is worth
 skimming -- and how tight the grid is -- changes over time.
@@ -27,8 +31,9 @@ deterministic function of the current demand phase, so the state is just
 MDP summary
 -----------
 State   : (demand phase P in {0..n_phase-1}, unbanked surplus U in {0..surplus_max})
-Actions : skim / overdraw each consumer's edge, or secure (bank) the surplus.
-Reward  : +banked energy on secure; -alarm_penalty on an alarm (U reset); else 0.
+Actions : skim / overdraw each consumer's edge, or lie low.
+Reward  : the surplus held that step; an alarm resets the surplus to 0 (so the
+          step after an alarm earns nothing until it is rebuilt).
 Horizon : fixed; the episode truncates after ``max_steps`` steps.
 """
 
@@ -52,11 +57,10 @@ def _build_action_names(consumers: tuple) -> list[str]:
     names: list[str] = []
     for c in consumers:
         names += [f"skim-{c}", f"overdraw-{c}"]
-    names.append("secure")
+    names.append("lie-low")
     return names
 
 
-# Default topology: three consumers fed from one substation.
 DEFAULT_CONSUMERS = ("C1", "C2", "C3")
 ACTION_NAMES = _build_action_names(DEFAULT_CONSUMERS)
 
@@ -71,8 +75,8 @@ class GridThiefEnv(_Base):
     n_phase : int
         Number of discrete demand phases (exogenous random walk). Higher phase =
         tighter grid (less slack, closer monitoring).
-    surplus_max, bank_rate, max_steps : int
-        Surplus cap, energy banked per secure, and episode length.
+    surplus_max, max_steps : int
+        Surplus cap and episode length.
     base_waste : int
         Total slack (overproduction) injected in phase 0; it falls by one per phase.
     base_sens : float
@@ -83,8 +87,6 @@ class GridThiefEnv(_Base):
         How strongly a delivered-demand shortfall raises the alarm probability.
     overdraw_extra : int
         Extra energy an ``overdraw`` takes beyond the slack (into delivered demand).
-    alarm_penalty : float
-        Reward subtracted when an alarm fires.
     seed : int, optional
         Seed for the dynamics RNG (phase walk and alarm draws).
     """
@@ -96,14 +98,12 @@ class GridThiefEnv(_Base):
         n_consumers: int = 3,
         n_phase: int = 4,
         surplus_max: int = 8,
-        bank_rate: int = 4,
         max_steps: int = 50,
-        base_waste: int = 4,
-        base_sens: float = 0.04,
+        base_waste: int = 3,
+        base_sens: float = 0.10,
         base_divert: float = 1.0,
         shortfall_weight: float = 1.5,
         overdraw_extra: int = 2,
-        alarm_penalty: float = 2.0,
         seed: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -113,22 +113,19 @@ class GridThiefEnv(_Base):
         self.n_consumers = int(n_consumers)
         self.n_phase = int(n_phase)
         self.surplus_max = int(surplus_max)
-        self.bank_rate = int(bank_rate)
         self.max_steps = int(max_steps)
         self.base_waste = int(base_waste)
         self.base_sens = float(base_sens)
         self.base_divert = float(base_divert)
         self.shortfall_weight = float(shortfall_weight)
         self.overdraw_extra = int(overdraw_extra)
-        self.alarm_penalty = float(alarm_penalty)
 
         self.consumers = tuple(f"C{i+1}" for i in range(self.n_consumers))
         self.action_names = _build_action_names(self.consumers)
         self.n_taps = 2 * self.n_consumers
-        self.SECURE = self.n_taps
+        self.LIE_LOW = self.n_taps
         self.n_actions = self.n_taps + 1
 
-        # Per-phase flow / slack on each consumer edge, and monitoring sensitivity.
         self._build_grid()
 
         self.n_states = self.n_phase * (self.surplus_max + 1)
@@ -154,7 +151,6 @@ class GridThiefEnv(_Base):
         for ph in range(self.n_phase):
             demands = np.array([1 + ((i + ph) % 3) for i in range(n)])
             waste = max(0, self.base_waste - ph)          # tighter grid at high phase
-            # Slack pools where demand is low; hand it out one unit at a time.
             w = (demands.max() - demands + 1).astype(float)
             alloc = np.zeros(n, dtype=np.int64)
             for _ in range(waste):
@@ -180,14 +176,13 @@ class GridThiefEnv(_Base):
     def _get_obs(self) -> int:
         return self._encode()
 
-    def _info(self, alarm=False, stolen=0, banked=0, tapped=-1, shortfall=0) -> dict[str, Any]:
+    def _info(self, alarm=False, stolen=0, tapped=-1, shortfall=0) -> dict[str, Any]:
         return {
             "phase": self.phase,
             "surplus": self.surplus,
             "alarm": alarm,
             "stolen": stolen,
-            "banked": banked,
-            "tapped": tapped,       # consumer edge tapped this step, or -1
+            "tapped": tapped,        # consumer edge tapped this step, or -1
             "shortfall": shortfall,  # delivered-demand shortfall caused this step
             "t": self.t,
         }
@@ -214,41 +209,36 @@ class GridThiefEnv(_Base):
         reward = 0.0
         alarm = False
         stolen = 0
-        banked = 0
         tapped = -1
         shortfall = 0
 
-        if action == self.SECURE:
-            banked = min(self.surplus, self.bank_rate)
-            self.surplus -= banked
-            reward = float(banked)
-        else:
+        if action != self.LIE_LOW:
             c, overdraw = divmod(action, 2)
             tapped = c
             slack = int(self.slack[self.phase, c])
             flow = int(self.flow[self.phase, c])
-            if overdraw:
-                steal = min(slack + self.overdraw_extra, flow)  # can't take more than flows
-                shortfall = steal - slack                        # dips into delivered demand
-            else:
-                steal = slack                                    # skim only the waste
-            # Alarm probability: a base for any diversion plus the shortfall it causes,
-            # scaled by the phase's monitoring sensitivity. Skimming waste (shortfall 0)
-            # is cheap; overdrawing (starving a consumer) is conspicuous.
-            if steal > 0:
+            requested = min(slack + self.overdraw_extra, flow) if overdraw else slack
+            take = min(requested, self.surplus_max - self.surplus)  # only what fits
+            if take > 0:
+                shortfall = max(0, take - slack)     # dips into delivered demand
+                # Alarm probability: a base for any diversion plus the shortfall it
+                # causes, scaled by the phase's monitoring sensitivity.
                 p = self.sens[self.phase] * (self.base_divert + self.shortfall_weight * shortfall)
                 if self._rng.random() < min(1.0, p):
                     alarm = True
-                    self.surplus = 0
-                    reward = -self.alarm_penalty
+                    self.surplus = 0                # the whole run is forfeited
                 else:
-                    stolen = min(steal, self.surplus_max - self.surplus)
+                    stolen = take
                     self.surplus += stolen
 
+        # Reward = surplus held this step: the thief benefits from the diverted
+        # energy every step it keeps it, so accumulating a large surplus and not
+        # losing it to an alarm is what pays off.
+        reward = float(self.surplus)
         self.phase = self._next_phase()
         self.t += 1
         truncated = self.t >= self.max_steps
-        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, banked, tapped, shortfall)
+        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, tapped, shortfall)
 
     # ------------------------------------------------------------------
     # Rendering

@@ -1,27 +1,30 @@
 """Energy Thief environment -- Level 2 (medium network, flows + adaptive suspicion).
 
-Level 2 keeps Level 1's real power-grid model -- a plant feeding several
-**consumers** through transmission edges that carry **energy flows**, with the
-overproduction on each edge available as divertible **slack** -- but on a bigger
-network: the plant feeds **two substations**, each serving its own group of
-consumers, and one substation is watched more closely than the other (a per-
-substation monitoring factor). It also adds the brief's **adaptive monitoring**:
-each consumer edge now
+Level 2 keeps Level 1's real power-grid model -- a plant feeding **consumers**
+through transmission edges that carry **energy flows**, with the overproduction on
+each edge available as divertible **slack** -- but on a bigger network: the plant
+feeds **two substations**, each serving its own group of consumers, and one
+substation is watched more closely than the other (a per-substation monitoring
+factor). It also adds the brief's **adaptive monitoring**: each consumer edge now
 carries a **suspicion** ("heat") that **rises each time it is tapped** (skim or
 overdraw) and **cools when left alone**. Suspicion inflates that edge's alarm
 probability, so repeatedly milking one line becomes self-defeating -- the thief
 must **diversify** across the grid.
 
-The suspicion of every edge enters the state, so the discrete state space
-explodes as ``k ** n_consumers``. Tabular Q-learning can still be *run*, but most
-states are visited too rarely to learn: that curse of dimensionality is what
-motivates linear function approximation with hand-crafted features.
+Reward is as in Level 1: the thief is rewarded for the surplus it holds each step,
+and a **triggered alarm resets the accumulated surplus** to zero; a **lie-low**
+action operates nothing and protects the surplus.
+
+The suspicion of every edge enters the state, so the discrete state space explodes
+as ``k ** n_consumers``. Tabular Q-learning can still be *run*, but most states are
+visited too rarely to learn: that curse of dimensionality is what motivates linear
+function approximation with hand-crafted features.
 
 MDP summary
 -----------
 State   : (demand phase P, surplus U, suspicion sigma_c for each consumer edge)
-Actions : skim / overdraw each consumer's edge, or secure (bank) the surplus.
-Reward  : +banked energy on secure; -alarm_penalty on an alarm (U reset); else 0.
+Actions : skim / overdraw each consumer's edge, or lie low.
+Reward  : the surplus held that step; an alarm resets the surplus to 0.
 Horizon : fixed; the episode truncates after ``max_steps`` steps.
 """
 
@@ -45,7 +48,7 @@ def _build_action_names(consumers: tuple) -> list[str]:
     names: list[str] = []
     for c in consumers:
         names += [f"skim-{c}", f"overdraw-{c}"]
-    names.append("secure")
+    names.append("lie-low")
     return names
 
 
@@ -54,11 +57,15 @@ ACTION_NAMES = _build_action_names(DEFAULT_CONSUMERS)
 
 
 class GridThiefEnvL2(_Base):
-    """Level-2 Energy Thief network: flows + slack + adaptive per-edge suspicion.
+    """Level-2 Energy Thief network: flows + slack + two substations + suspicion.
 
-    Parameters mirror Level 1's ``GridThiefEnv`` with three additions for the
-    adaptive monitoring:
+    Adds to Level 1's parameters:
 
+    n_substations : int
+        Number of substations; consumers are split into contiguous groups.
+    substation_sens : sequence of float, optional
+        Per-substation monitoring multiplier (length n_substations); default rises
+        by 0.3 per substation, so later substations are watched more closely.
     susp_levels : int
         Number of discrete suspicion levels per edge (``k``).
     susp_factor : float
@@ -75,10 +82,9 @@ class GridThiefEnvL2(_Base):
         n_substations: int = 2,
         n_phase: int = 4,
         surplus_max: int = 8,
-        bank_rate: int = 4,
         max_steps: int = 50,
-        base_waste: int = 6,
-        base_sens: float = 0.04,
+        base_waste: int = 4,
+        base_sens: float = 0.08,
         base_divert: float = 1.0,
         shortfall_weight: float = 1.5,
         overdraw_extra: int = 2,
@@ -86,7 +92,6 @@ class GridThiefEnvL2(_Base):
         susp_factor: float = 1.0,
         cool_prob: float = 0.3,
         substation_sens: Optional[tuple] = None,
-        alarm_penalty: float = 2.0,
         seed: Optional[int] = None,
     ) -> None:
         super().__init__()
@@ -99,7 +104,6 @@ class GridThiefEnvL2(_Base):
         self.n_substations = int(n_substations)
         self.n_phase = int(n_phase)
         self.surplus_max = int(surplus_max)
-        self.bank_rate = int(bank_rate)
         self.max_steps = int(max_steps)
         self.base_waste = int(base_waste)
         self.base_sens = float(base_sens)
@@ -109,14 +113,12 @@ class GridThiefEnvL2(_Base):
         self.k = int(susp_levels)
         self.susp_factor = float(susp_factor)
         self.cool_prob = float(cool_prob)
-        self.alarm_penalty = float(alarm_penalty)
 
         self.consumers = tuple(f"C{i+1}" for i in range(self.n_consumers))
         self.action_names = _build_action_names(self.consumers)
 
-        # Two substations feed the consumers as contiguous groups; each substation
-        # has its own monitoring sensitivity (a newer substation is watched more
-        # closely), so which substation a consumer sits under affects its risk.
+        # Two substations feed the consumers as contiguous groups; each has its own
+        # monitoring sensitivity, so which substation a consumer sits under matters.
         self.substations = tuple(f"S{s+1}" for s in range(self.n_substations))
         self.substation_of = np.zeros(self.n_consumers, dtype=np.int64)
         base, rem, idx = divmod(self.n_consumers, self.n_substations) + (0,)
@@ -128,8 +130,9 @@ class GridThiefEnvL2(_Base):
         if len(substation_sens) != self.n_substations:
             raise ValueError("substation_sens must have length n_substations.")
         self.substation_sens = tuple(float(x) for x in substation_sens)
+
         self.n_taps = 2 * self.n_consumers
-        self.SECURE = self.n_taps
+        self.LIE_LOW = self.n_taps
         self.n_actions = self.n_taps + 1
 
         self._build_grid()
@@ -186,14 +189,13 @@ class GridThiefEnvL2(_Base):
     def _get_obs(self) -> int:
         return self._encode()
 
-    def _info(self, alarm=False, stolen=0, banked=0, tapped=-1, shortfall=0) -> dict[str, Any]:
+    def _info(self, alarm=False, stolen=0, tapped=-1, shortfall=0) -> dict[str, Any]:
         return {
             "phase": self.phase,
             "surplus": self.surplus,
             "suspicion": self.susp.copy(),
             "alarm": alarm,
             "stolen": stolen,
-            "banked": banked,
             "tapped": tapped,
             "shortfall": shortfall,
             "t": self.t,
@@ -224,26 +226,20 @@ class GridThiefEnvL2(_Base):
         reward = 0.0
         alarm = False
         stolen = 0
-        banked = 0
         tapped = -1
         shortfall = 0
 
-        if action == self.SECURE:
-            banked = min(self.surplus, self.bank_rate)
-            self.surplus -= banked
-            reward = float(banked)
-        else:
+        if action != self.LIE_LOW:
             c, overdraw = divmod(action, 2)
             tapped = c
             slack = int(self.slack[self.phase, c])
             flow = int(self.flow[self.phase, c])
-            if overdraw:
-                steal = min(slack + self.overdraw_extra, flow)
-                shortfall = steal - slack
-            else:
-                steal = slack
-            if steal > 0:
-                # Same alarm model as Level 1, now inflated by this edge's suspicion.
+            requested = min(slack + self.overdraw_extra, flow) if overdraw else slack
+            take = min(requested, self.surplus_max - self.surplus)
+            if take > 0:
+                shortfall = max(0, take - slack)
+                # Level-1 alarm model, inflated by the substation factor and this
+                # edge's suspicion.
                 p = (self.sens[self.phase]
                      * self.substation_sens[self.substation_of[c]]
                      * (self.base_divert + self.shortfall_weight * shortfall)
@@ -252,16 +248,17 @@ class GridThiefEnvL2(_Base):
                 if self._rng.random() < min(1.0, p):
                     alarm = True
                     self.surplus = 0
-                    reward = -self.alarm_penalty
                 else:
-                    stolen = min(steal, self.surplus_max - self.surplus)
+                    stolen = take
                     self.surplus += stolen
 
+        # Reward = surplus held this step (see Level 1).
+        reward = float(self.surplus)
         self._cool(tapped)
         self.phase = self._next_phase()
         self.t += 1
         truncated = self.t >= self.max_steps
-        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, banked, tapped, shortfall)
+        return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, tapped, shortfall)
 
     def render(self) -> str:
         heat = " ".join(f"{self.consumers[i]}{self.susp[i]}" for i in range(self.n_consumers))
