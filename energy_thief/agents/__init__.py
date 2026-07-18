@@ -1,5 +1,6 @@
 """Energy Thief agents."""
 
 from energy_thief.agents.q_learning import QLearningAgent
+from energy_thief.agents.linear_q_learning import LinearQLearningAgent
 
-__all__ = ["QLearningAgent"]
+__all__ = ["QLearningAgent", "LinearQLearningAgent"]
