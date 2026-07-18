@@ -5,15 +5,30 @@ Reinforcement Learning final project — UniMI Data Science & Economics (AA 2025
 A thief moves on a grid-shaped power grid, **siphons** energy into an *unbanked
 surplus*, and must reach the **exit** to cash out before a monitoring **alarm**
 wipes the surplus. The same parameterized environment is instantiated at three
-complexity levels to force a methodological progression:
+complexity levels:
 
-| Level | Environment | Method |
-|-------|-------------|--------|
-| **L1** | small discrete grid | tabular Q-learning |
-| **L2** | medium grid + per-cell heat | linear function approximation |
-| **L3** | large grid, continuous flows, partial observability | DQN |
+| Level | Environment |
+|-------|-------------|
+| **L1** | small discrete grid |
+| **L2** | medium grid + per-cell heat (adaptive monitoring) |
+| **L3** | large grid, continuous flows, partial observability |
+
+We evaluate **three algorithms** — tabular Q-learning, linear function
+approximation (semi-gradient), and DQN — and run the full **3×3 matrix**: every
+algorithm on every level. The diagonal is the *hypothesized* best fit (tabular
+for L1, linear for L2, DQN for L3), but the point of the experiment is the
+**off-diagonal** cells: showing *why* the tabular table breaks down as the state
+space grows, and where approximation becomes necessary, is the evidence that
+justifies each method transition.
+
+|            | L1 (small) | L2 (medium + heat) | L3 (large, partial-obs) |
+|------------|:----------:|:------------------:|:-----------------------:|
+| **Tabular Q-learning** | ✔ expected fit | curse of dimensionality | infeasible |
+| **Linear FA** | works, redundant | ✔ expected fit | limited by features |
+| **DQN** | works, over-engineered | works | ✔ expected fit |
 
 This README documents **Level 1**: the MDP and the tabular Q-learning algorithm.
+The other levels and algorithms are added as the project progresses.
 
 ---
 
