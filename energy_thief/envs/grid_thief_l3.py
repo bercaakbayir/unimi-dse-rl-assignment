@@ -23,12 +23,19 @@ Because the value is a nonlinear function of an unobservable state, hand-crafted
 features saturate and only a **DQN** (a neural network over stacked observations, with
 replay + target network) can handle it.
 
+As in Levels 1-2, the thief is rewarded for **the energy it steals each step** (the
+return is the total energy stolen), and a **triggered alarm** raises no haul, **locks
+the thief out** for ``k_lock`` steps, and spikes the (hidden) suspicion on the tapped
+line. The lock-out counter *is* observable; the per-line suspicion is not.
+
 MDP summary
 -----------
-State   : continuous. Observed: per-line slack, surplus, time, and AGGREGATE stats
-          (total load, mean suspicion, recent alarm rate). Hidden: per-line suspicion.
+State   : continuous. Observed: per-line slack, time, lock-out counter, and AGGREGATE
+          stats (total load, mean suspicion, recent alarm rate). Hidden: per-line
+          suspicion. The cumulative haul is a scoreboard, not part of the state.
 Actions : skim / overdraw each consumer's edge, or lie low.
-Reward  : the surplus held that step; an alarm resets the surplus to 0.
+Reward  : the energy stolen that step (0 on lie-low, a no-op, or while locked out).
+Alarm   : no haul that step; locks stealing out for ``k_lock`` steps; suspicion spike.
 Horizon : fixed; the episode truncates after ``max_steps`` steps.
 """
 
@@ -75,13 +82,14 @@ class GridThiefEnvL3(_Base):
         max_steps: int = 50,
         surplus_cap: float = 10.0,
         base_sens: float = 0.05,
-        base_divert: float = 1.0,
+        base_divert: float = 0.5,
         shortfall_weight: float = 1.5,
         overdraw_frac: float = 0.5,
         susp_up: float = 0.30,
         susp_decay: float = 0.85,
         susp_factor: float = 1.0,
         alarm_window: int = 8,
+        k_lock: int = 3,
         substation_sens: Optional[tuple] = None,
         seed: Optional[int] = None,
     ) -> None:
@@ -92,7 +100,7 @@ class GridThiefEnvL3(_Base):
         self.n_consumers = int(n_consumers)
         self.n_substations = int(n_substations)
         self.max_steps = int(max_steps)
-        self.surplus_cap = float(surplus_cap)
+        self.surplus_cap = float(surplus_cap)   # display-only gauge normaliser
         self.base_sens = float(base_sens)
         self.base_divert = float(base_divert)
         self.shortfall_weight = float(shortfall_weight)
@@ -101,6 +109,7 @@ class GridThiefEnvL3(_Base):
         self.susp_decay = float(susp_decay)
         self.susp_factor = float(susp_factor)
         self.alarm_window = int(alarm_window)
+        self.k_lock = int(k_lock)
 
         self.consumers = tuple(f"C{i+1}" for i in range(self.n_consumers))
         self.action_names = _build_action_names(self.consumers)
@@ -129,14 +138,15 @@ class GridThiefEnvL3(_Base):
 
         self._rng = np.random.default_rng(seed)
 
-        # Observation: per-line slack + surplus + time + [load, mean susp, alarm rate].
+        # Observation: per-line slack + time + lock-out + [load, mean susp, alarm rate].
         self.obs_dim = self.n_consumers + 1 + 1 + 3
         if spaces is not None:
             self.observation_space = spaces.Box(low=-5.0, high=5.0, shape=(self.obs_dim,), dtype=np.float32)
             self.action_space = spaces.Discrete(self.n_actions)
 
-        self.surplus = 0.0
+        self.surplus = 0.0            # cumulative haul (scoreboard only, uncapped)
         self.susp = np.zeros(self.n_consumers)
+        self.lock_remaining = 0
         self.t = 0
         self._phase_off = np.zeros(self.n_consumers)
         self._alarm_hist: deque = deque(maxlen=self.alarm_window)
@@ -166,8 +176,8 @@ class GridThiefEnvL3(_Base):
         recent_alarm = float(np.mean(self._alarm_hist)) if self._alarm_hist else 0.0
         obs = np.concatenate([
             slack / 2.0,                       # per-line slack (observable flow)
-            [self.surplus / self.surplus_cap], # surplus held
             [self.t / self.max_steps],         # time in shift
+            [self.lock_remaining / max(1, self.k_lock)],  # lock-out counter (observable)
             [load / self.load_ref],            # aggregate load
             [self.susp.mean()],                # AGGREGATE suspicion index (indirect)
             [recent_alarm],                    # recent alarm rate
@@ -176,14 +186,16 @@ class GridThiefEnvL3(_Base):
 
     def _info(self, alarm=False, stolen=0.0, tapped=-1, shortfall=0.0) -> dict[str, Any]:
         return {
-            "surplus": self.surplus,
+            "surplus": self.surplus,         # cumulative haul (scoreboard)
             "suspicion": self.susp.copy(),   # true hidden state (for plotting only)
             "slack": self._slack(self.t),
             "load": float(self._demand(self.t).sum()),
             "alarm": alarm,
-            "stolen": stolen,
+            "stolen": stolen,                # energy stolen this step (the reward)
             "tapped": tapped,
             "shortfall": shortfall,
+            "locked": self.lock_remaining > 0,
+            "lock_remaining": self.lock_remaining,
             "t": self.t,
         }
 
@@ -195,6 +207,7 @@ class GridThiefEnvL3(_Base):
             self._rng = np.random.default_rng(seed)
         self.surplus = 0.0
         self.susp = np.zeros(self.n_consumers)
+        self.lock_remaining = 0
         self.t = 0
         self._phase_off = self._rng.uniform(0, 2 * np.pi, size=self.n_consumers)
         self._alarm_hist = deque(maxlen=self.alarm_window)
@@ -213,8 +226,9 @@ class GridThiefEnvL3(_Base):
         stolen = 0.0
         tapped = -1
         shortfall = 0.0
+        locked = self.lock_remaining > 0
 
-        if action != self.LIE_LOW:
+        if (not locked) and action != self.LIE_LOW:
             c, overdraw = divmod(action, 2)
             tapped = c
             if overdraw:
@@ -223,8 +237,7 @@ class GridThiefEnvL3(_Base):
             else:
                 extra = 0.0
                 requested = slack[c]                        # skim the waste only
-            take = min(requested, self.surplus_cap - self.surplus)
-            take = max(0.0, take)
+            take = max(0.0, requested)                       # haul is uncapped now
             if take > 1e-9:
                 # shortfall = how much of what we took came from delivered demand
                 shortfall = max(0.0, take - slack[c])
@@ -233,22 +246,30 @@ class GridThiefEnvL3(_Base):
                      * (1.0 + self.susp_factor * self.susp[c]))
                 self.susp[c] += self.susp_up * take
                 if self._rng.random() < min(1.0, p):
-                    alarm = True
-                    self.surplus = 0.0
+                    alarm = True                             # caught: no haul, lock-out follows
+                    self.susp[c] += 1.0                      # hidden suspicion spike
                 else:
                     stolen = take
-                    self.surplus += take
+                    self.surplus += take                     # haul is kept -- never confiscated
+
+        # Reward = energy stolen this step; the return is the total energy stolen.
+        reward = float(stolen)
+
+        # Lock-out bookkeeping: an alarm arms the lock-out; otherwise it counts down.
+        if alarm:
+            self.lock_remaining = self.k_lock
+        elif self.lock_remaining > 0:
+            self.lock_remaining -= 1
 
         self.susp *= self.susp_decay          # all lines cool a little each step
         self._alarm_hist.append(1.0 if alarm else 0.0)
-        reward = float(self.surplus)          # surplus held this step
 
         self.t += 1
         truncated = self.t >= self.max_steps
         return self._get_obs(), reward, False, truncated, self._info(alarm, stolen, tapped, shortfall)
 
     def render(self) -> str:
-        slack = self._slack(self.t)
-        return (f"t={self.t:<3} surplus={self.surplus:.1f}/{self.surplus_cap:.0f}"
+        lock = f" LOCKED({self.lock_remaining})" if self.lock_remaining > 0 else ""
+        return (f"t={self.t:<3} haul={self.surplus:.1f}"
                 f"  load={self._demand(self.t).sum():.1f}  mean_susp={self.susp.mean():.2f}"
-                f"  (per-line susp hidden)")
+                f"  (per-line susp hidden){lock}")

@@ -16,23 +16,27 @@ slack $s_c$) or **overdraw** (take $s_c+\Delta$, a shortfall $h$ into delivered 
 plus **lie-low** (do nothing). $|\mathcal{A}| = 2n+1$.
 
 **Dynamics** $P$ — demand drifts, setting each line's slack $s_c$ and the monitoring
-sensitivity $\varsigma$. A tap adds $\text{take}$ to the surplus $U$; it trips the alarm with
-$$p = \min\!\big(1,\ \varsigma\,(\beta_0+\beta_h\,h)\ [\,\times\, m_{\text{sub}(c)}(1+\sigma_c)\,]\big),$$
-which resets $U\to0$. Skimming ($h=0$) is cheap; overdrawing and a tighter grid are riskier;
-the bracket (L2/L3) adds a per-substation factor $m$ and a per-line **suspicion** $\sigma_c$
-that rises when tapped and cools when idle.
+sensitivity $\varsigma$. A tap steals $\text{take}$ energy; it trips the alarm with
+$$p = \min\!\big(1,\ \varsigma\,(\beta_0+\beta_h\,h)\ [\,\times\, m_{\text{sub}(c)}(1+\sigma_c)\,]\big).$$
+Skimming ($h=0$) is cheap; overdrawing and a tighter grid are riskier; the bracket (L2/L3)
+adds a per-substation factor $m$ and a per-line **suspicion** $\sigma_c$ that rises when
+tapped and cools when idle. **On an alarm** the thief steals nothing that step and is
+**locked out** for $k_{\text{lock}}$ steps (taps become no-ops), and the monitoring spikes —
+getting caught costs *future* stealing time, not the haul already taken.
 
-**Reward** $R = U'$ — the surplus held after the step (an alarm makes it $0$). Maximize
+**Reward** $R = \text{energy stolen this step}$ (0 on lie-low, a no-op, or while locked out),
+so the return is the **total energy stolen** over the shift. Maximize
 $\mathbb{E}\big[\sum_t \gamma^t R_t\big]$, i.e. learn $q_\star$ satisfying the Bellman optimality
-equation $q_\star(s,a)=\mathbb{E}[\,R + \gamma \max_{a'} q_\star(s',a')\,]$.
+equation $q_\star(s,a)=\mathbb{E}[\,R + \gamma \max_{a'} q_\star(s',a')\,]$. The accumulated haul
+is the *score*, not part of the state.
 
-**State** $\mathcal{S}$ — the levels differ only here:
+**State** $\mathcal{S}$ — the grid condition the thief reads to act; the levels differ only here:
 
 | Level | state $s$ | size | method |
 |-------|-----------|------|--------|
-| **L1** | $(\phi,\,U)$ — demand phase, surplus | 36 | tabular Q |
-| **L2** | $(\phi,\,U,\,\sigma_1..\sigma_n)$ — + per-line suspicion | 26,244 | tabular Q, **linear FA** |
-| **L3** | continuous vector (per-line slack, surplus, aggregate stats); per-line $\sigma$ **hidden** | ∞ (POMDP) | linear FA, DQN |
+| **L1** | $(\phi,\,s_1..s_n,\,\ell)$ — phase, per-line slack, lock-out | 324 | tabular Q |
+| **L2** | $(\phi,\,\sigma_1..\sigma_n,\,\ell)$ — + per-line suspicion | 11,664 | tabular Q, **linear FA** |
+| **L3** | continuous vector (per-line slack, time, lock-out, aggregate stats); per-line $\sigma$ **hidden** | ∞ (POMDP) | linear FA, **DQN** |
 
 ## Q-learning (tabular, off-policy TD control)
 
@@ -68,30 +72,39 @@ for each episode:
     ε ← max(ε_min, ε · ε_decay)
 ```
 
-Features: **L2** = [bias, surplus, phase one-hot, per-line $\sigma$, per-line slack];
+Features: **L2** = [bias, lock-out, phase one-hot, per-line $\sigma$, per-line slack];
 **L3** = the continuous observation + bias.
+
+## DQN (Level 3)
+
+A neural network $Q(s,a;\theta)$ trained on the same one-sample Bellman target, stabilised by a
+**replay buffer** + a **target network**, and fed a **frame-stack of the last $k=3$ observations**
+so it can infer the hidden per-line suspicion from history — what a linear map of one aggregate
+observation cannot do.
 
 ## Results (5 seeds, greedy return, MWh)
 
-| | random | tabular Q | linear FA |
-|---|:---:|:---:|:---:|
-| **L1** | ~0 | **+1540** | — |
-| **L2** | +790 | +1270 | **+1434** (generalises, beats table) |
-| **L3** | +1000 | +1100 (≈ random) | +980 (≈ random) |
+| | random | tabular Q | linear FA | DQN |
+|---|:---:|:---:|:---:|:---:|
+| **L1** | +131 | **+264** | — | — |
+| **L2** | +76 | +117 | **+191** (generalises, beats table) | — |
+| **L3** | +107 | — | +109 (≈ random) | **+161** |
 
-L1 tabular works → L2 the state explodes, linear FA generalises and wins → L3 both fail
-(continuous + partial-obs; the value depends on the hidden $\sigma$) → DQN.
+L1 tabular works → L2 the state explodes, linear FA generalises and beats the strained table → L3
+continuous + partial-obs, the value depends on the hidden $\sigma$ so linear FA sits at random and
+only the **DQN** copes.
 
 ## Layout
 
 ```
 energy_thief/
-  envs/grid_thief.py        # GridThiefEnv    — L1 (36 states)
-  envs/grid_thief_l2.py     # GridThiefEnvL2  — L2 (+ 2 substations, suspicion; 26k states)
+  envs/grid_thief.py        # GridThiefEnv    — L1 (324 states)
+  envs/grid_thief_l2.py     # GridThiefEnvL2  — L2 (+ 2 substations, suspicion; 11,664 states)
   envs/grid_thief_l3.py     # GridThiefEnvL3  — L3 (continuous, partial-obs)
   agents/q_learning.py      # QLearningAgent        — tabular
   agents/linear_q_learning.py  # LinearQLearningAgent — semi-gradient linear FA
-notebooks/                  # level-{1,2,3}.ipynb — MDP, env, Q-learning, linear FA, animation
+  agents/dqn.py             # DQNAgent              — replay + target net (needs torch)
+notebooks/                  # level-{1,2,3}.ipynb — MDP, env, training, results, animations
 ```
 
 Run notebooks from the repo root. Energy is shown in **MW** (1 unit = 5 MW), return in **MWh**.
