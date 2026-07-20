@@ -38,6 +38,14 @@ is the *score*, not part of the state.
 | **L2** | $(\phi,\,\sigma_1..\sigma_n,\,\ell)$ — + per-line suspicion | 11,664 | tabular Q, **linear FA** |
 | **L3** | continuous vector (per-line slack, time, lock-out, aggregate stats); per-line $\sigma$ **hidden** | ∞ (POMDP) | linear FA, **DQN** |
 
+This realizes the brief's three levels — **small discrete grid → medium grid with richer state →
+large grid with continuous variables**. Each level foregrounds the one axis that motivates its
+method: L1 puts *stochastic slack* in the state (a non-trivial small table); L2's **richer state**
+adds the *adaptive per-line suspicion* $\sigma_c$ (the $k^n$ explosion), with slack kept a
+deterministic function of $\phi$ so the space stays ~$10^4$ rather than ~$10^6$ and the tabular
+baseline remains meaningful; L3 makes the flows *continuous* and the suspicion *hidden* (POMDP).
+The levels are thus increasing in complexity but not strictly nested — a deliberate modeling choice.
+
 ## Q-learning (tabular, off-policy TD control)
 
 Update: $Q(S_t,A_t) \leftarrow Q(S_t,A_t) + \alpha\big[\,R_{t+1} + \gamma\max_a Q(S_{t+1},a) - Q(S_t,A_t)\,\big]$.
@@ -93,6 +101,12 @@ observation cannot do.
 L1 tabular works → L2 the state explodes, linear FA generalises and beats the strained table → L3
 continuous + partial-obs, the value depends on the hidden $\sigma$ so linear FA sits at random and
 only the **DQN** copes.
+
+**Tradeoffs.** The progression buys **policy quality** at the cost of **interpretability** and
+**sample efficiency**: the L1 table gives a legible, inspectable policy from little experience; the
+DQN reaches a working policy where the others can't, but needs far more experience and is a black
+box. Linear FA sits in between — cheap and still readable through its weights, as long as the state
+is fully observed.
 
 ## Layout
 
