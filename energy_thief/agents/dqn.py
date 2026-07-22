@@ -1,21 +1,4 @@
-"""Deep Q-Network agent (neural Q-learning + experience replay + target network).
-
-Follows the lecture ``rlc.agents.dqn`` reference (Lecture 5, deep RL). It maps a
-state vector directly to one Q-value per (discrete) action -- no hand-crafted
-features -- and tames the instabilities of naive neural Q-learning with two devices:
-
-* a **replay buffer** that decorrelates consecutive updates and reuses transitions;
-* a **target network**, synced periodically, that keeps the bootstrap target
-  stationary between syncs.
-
-Same agent protocol as the tabular / linear agents (``select_action`` / ``update`` /
-``end_episode``), so it plugs into the same training loop. For the partially-observed
-Level-3 grid, feed it a **stack of the last k observations** (done in the notebook) so
-the network has a short history from which to infer the hidden state.
-"""
-
 from __future__ import annotations
-
 import copy
 import random
 from collections import deque, namedtuple
@@ -27,8 +10,6 @@ import torch.nn as nn
 
 
 class QNetwork(nn.Module):
-    """State vector in, one Q-value per action out (a small MLP)."""
-
     def __init__(self, n_state_features: int, n_actions: int, hidden_size: int = 64):
         super().__init__()
         self.net = nn.Sequential(
@@ -47,8 +28,6 @@ Transition = namedtuple("Transition", ["state", "action", "reward", "next_state"
 
 
 class ReplayBuffer:
-    """Fixed-capacity store of transitions, sampled uniformly for learning."""
-
     def __init__(self, capacity: int, *, seed: Optional[int] = None):
         self._buffer: deque = deque(maxlen=int(capacity))
         self._rng = random.Random(seed)
@@ -73,8 +52,6 @@ class ReplayBuffer:
 
 
 class DQNAgent:
-    """Deep Q-Network: neural Q-learning with replay buffer and target network."""
-
     def __init__(self, n_state_features: int, n_actions: int, hidden_size: int = 64,
                  lr: float = 1e-3, gamma: float = 0.99, epsilon_start: float = 1.0,
                  epsilon_min: float = 0.05, epsilon_decay: float = 0.995,

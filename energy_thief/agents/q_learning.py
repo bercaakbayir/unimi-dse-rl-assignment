@@ -1,9 +1,5 @@
-"""Tabular Q-learning agent (off-policy TD control)."""
-
 from __future__ import annotations
-
 from typing import Optional
-
 import numpy as np
 
 
@@ -45,11 +41,9 @@ class QLearningAgent:
         reward: float,
         next_state: int,
         terminated: bool,
-        next_action: Optional[int] = None,  # unused; keeps the SARSA interface
+        next_action: Optional[int] = None,  # unused: keeps the SARSA interface
     ) -> None:
-        # Off-policy target uses max_a Q(s', a): the greedy value regardless of
-        # the (exploratory) action actually taken next. No bootstrap on a
-        # terminal transition, since there is no future return.
+        # Off-policy target uses max_a Q(s', a): the greedy value regardless of the (exploratory) action actually taken next. No bootstrap on a terminal transition, since there is no future return.
         bootstrap = 0.0 if terminated else self.Q[next_state].max()
         td_target = reward + self.gamma * bootstrap
         self.Q[state, action] += self.alpha * (td_target - self.Q[state, action])

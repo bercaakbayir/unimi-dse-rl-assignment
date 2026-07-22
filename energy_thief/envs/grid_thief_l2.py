@@ -1,51 +1,12 @@
-"""Energy Thief environment -- Level 2 (medium network, flows + adaptive suspicion).
-
-Level 2 keeps Level 1's real power-grid model -- a plant feeding **consumers**
-through transmission edges that carry **energy flows**, with the overproduction on
-each edge available as divertible **slack** -- but on a bigger network: the plant
-feeds **two substations**, each serving its own group of consumers, and one
-substation is watched more closely than the other (a per-substation monitoring
-factor). It also adds the brief's **adaptive monitoring**: each consumer edge now
-carries a **suspicion** ("heat") that **rises each time it is tapped** (skim or
-overdraw) and **cools when left alone**. Suspicion inflates that edge's alarm
-probability, so repeatedly milking one line becomes self-defeating -- the thief
-must **diversify** across the grid.
-
-Reward is as in Level 1: the thief is rewarded for **the energy it steals each
-step**, so the return is the **total energy stolen**. A **triggered alarm** raises
-no haul that step, **locks the thief out** for ``k_lock`` steps, and **spikes the
-monitoring**: the tapped edge's suspicion jumps to its maximum and every edge on the
-same substation heats up. A **lie-low** action operates nothing.
-
-The suspicion of every edge enters the state, so the discrete state space explodes
-as ``k ** n_consumers``. Tabular Q-learning can still be *run*, but most states are
-visited too rarely to learn: that curse of dimensionality is what motivates linear
-function approximation with hand-crafted features.
-
-MDP summary
------------
-State   : (demand phase P, suspicion sigma_c for each consumer edge, lock-out steps
-           remaining). The cumulative haul is a scoreboard, not part of the state.
-Actions : skim / overdraw each consumer's edge, or lie low.
-Reward  : the energy stolen that step (0 on lie-low, a no-op, or while locked out).
-Alarm   : no haul that step; locks stealing out for ``k_lock`` steps; suspicion spike.
-Horizon : fixed; the episode truncates after ``max_steps`` steps.
-"""
-
 from __future__ import annotations
-
 from typing import Any, Optional
-
 import numpy as np
 
-try:
-    import gymnasium as gym
-    from gymnasium import spaces
-    _Base = gym.Env
-except ModuleNotFoundError:  # pragma: no cover
-    gym = None
-    spaces = None
-    _Base = object
+
+import gymnasium as gym
+from gymnasium import spaces
+_Base = gym.Env
+
 
 
 def _build_action_names(consumers: tuple) -> list[str]:
@@ -61,24 +22,6 @@ ACTION_NAMES = _build_action_names(DEFAULT_CONSUMERS)
 
 
 class GridThiefEnvL2(_Base):
-    """Level-2 Energy Thief network: flows + slack + two substations + suspicion.
-
-    Adds to Level 1's parameters:
-
-    n_substations : int
-        Number of substations; consumers are split into contiguous groups.
-    substation_sens : sequence of float, optional
-        Per-substation monitoring multiplier (length n_substations); default rises
-        by 0.3 per substation, so later substations are watched more closely.
-    susp_levels : int
-        Number of discrete suspicion levels per edge (``k``).
-    susp_factor : float
-        Each suspicion level multiplies an edge's alarm risk by ``1 + susp_factor``.
-    cool_prob : float
-        Per-step probability that an untapped edge's suspicion cools by one level.
-    k_lock : int
-        Number of steps the thief is locked out of stealing after an alarm.
-    """
 
     metadata = {"render_modes": ["ansi"]}
 
@@ -99,9 +42,10 @@ class GridThiefEnvL2(_Base):
         k_lock: int = 3,
         substation_sens: Optional[tuple] = None,
         surplus_max: int = 8,
-        seed: Optional[int] = None,
-    ) -> None:
+        seed: Optional[int] = None) -> None:
+        
         super().__init__()
+        
         if n_consumers < 1 or n_phase < 1 or susp_levels < 1 or k_lock < 1:
             raise ValueError("counts must be >= 1.")
         if not 1 <= n_substations <= n_consumers:
@@ -120,13 +64,11 @@ class GridThiefEnvL2(_Base):
         self.susp_factor = float(susp_factor)
         self.cool_prob = float(cool_prob)
         self.k_lock = int(k_lock)
-        self.surplus_max = int(surplus_max)  # display-only gauge normaliser
+        self.surplus_max = int(surplus_max)  
 
         self.consumers = tuple(f"C{i+1}" for i in range(self.n_consumers))
         self.action_names = _build_action_names(self.consumers)
 
-        # Two substations feed the consumers as contiguous groups; each has its own
-        # monitoring sensitivity, so which substation a consumer sits under matters.
         self.substations = tuple(f"S{s+1}" for s in range(self.n_substations))
         self.substation_of = np.zeros(self.n_consumers, dtype=np.int64)
         base, rem, idx = divmod(self.n_consumers, self.n_substations) + (0,)
@@ -145,8 +87,7 @@ class GridThiefEnvL2(_Base):
 
         self._build_grid()
 
-        # State = (phase, per-edge suspicion, lock-out steps remaining). The haul is
-        # a scoreboard, not part of the state -- suspicion is what explodes |S|.
+
         self.n_states = (
             self.n_phase
             * (self.k ** self.n_consumers)
@@ -161,7 +102,7 @@ class GridThiefEnvL2(_Base):
         self.phase: int = 0
         self.susp = np.zeros(self.n_consumers, dtype=np.int64)
         self.lock_remaining: int = 0
-        self.surplus: int = 0   # cumulative haul (scoreboard only, uncapped)
+        self.surplus: int = 0   
         self.t: int = 0
 
     def _build_grid(self) -> None:
@@ -258,8 +199,6 @@ class GridThiefEnvL2(_Base):
             take = requested
             if take > 0:
                 shortfall = max(0, take - slack)
-                # Level-1 alarm model, inflated by the substation factor and this
-                # edge's suspicion.
                 p = (self.sens[self.phase]
                      * self.substation_sens[self.substation_of[c]]
                      * (self.base_divert + self.shortfall_weight * shortfall)
@@ -267,8 +206,6 @@ class GridThiefEnvL2(_Base):
                 self.susp[c] = min(self.susp[c] + 1, self.k - 1)   # heat rises on a tap
                 if self._rng.random() < min(1.0, p):
                     alarm = True                                   # caught: no haul, lock-out follows
-                    # Monitoring spike: the caught edge maxes out and the whole
-                    # substation is put on alert.
                     self.susp[c] = self.k - 1
                     sub = self.substation_of[c]
                     for j in range(self.n_consumers):
@@ -281,7 +218,6 @@ class GridThiefEnvL2(_Base):
         # Reward = energy stolen this step; the return is the total energy stolen.
         reward = float(stolen)
 
-        # Lock-out bookkeeping: an alarm arms the lock-out; otherwise it counts down.
         if alarm:
             self.lock_remaining = self.k_lock
         elif self.lock_remaining > 0:

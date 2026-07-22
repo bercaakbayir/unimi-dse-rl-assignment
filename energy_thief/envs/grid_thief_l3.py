@@ -1,59 +1,12 @@
-"""Energy Thief environment -- Level 3 (large network, continuous flows, POMDP).
-
-Level 3 is the hardest of the three complexity levels. It keeps the flow model of
-Levels 1-2 (a plant feeding consumers through substations; the thief skims the slack
-off a line or overdraws into delivered demand) but turns up three dials that finally
-defeat tabular and linear methods:
-
-1. **Continuous flows.** Consumer demands vary as continuous stochastic processes
-   over the shift, so each line's **slack is a real number**, not a small integer.
-   The state is continuous -- a Q-table cannot enumerate it.
-
-2. **Large network.** Many consumers across several substations -> a high-dimensional
-   continuous observation.
-
-3. **Partial observability (the brief's challenging variant).** Every line still
-   carries an adaptive **suspicion** (heat that rises when tapped and decays), and it
-   still drives the alarm -- but the agent **cannot observe it**. It sees only
-   *aggregate* grid statistics (total load, a global suspicion index, the recent alarm
-   rate) that carry indirect information. To know whether a specific line is hot, the
-   agent must infer the hidden state from its own history: a POMDP.
-
-Because the value is a nonlinear function of an unobservable state, hand-crafted linear
-features saturate and only a **DQN** (a neural network over stacked observations, with
-replay + target network) can handle it.
-
-As in Levels 1-2, the thief is rewarded for **the energy it steals each step** (the
-return is the total energy stolen), and a **triggered alarm** raises no haul, **locks
-the thief out** for ``k_lock`` steps, and spikes the (hidden) suspicion on the tapped
-line. The lock-out counter *is* observable; the per-line suspicion is not.
-
-MDP summary
------------
-State   : continuous. Observed: per-line slack, time, lock-out counter, and AGGREGATE
-          stats (total load, mean suspicion, recent alarm rate). Hidden: per-line
-          suspicion. The cumulative haul is a scoreboard, not part of the state.
-Actions : skim / overdraw each consumer's edge, or lie low.
-Reward  : the energy stolen that step (0 on lie-low, a no-op, or while locked out).
-Alarm   : no haul that step; locks stealing out for ``k_lock`` steps; suspicion spike.
-Horizon : fixed; the episode truncates after ``max_steps`` steps.
-"""
-
 from __future__ import annotations
-
 from collections import deque
 from typing import Any, Optional
-
 import numpy as np
 
-try:
-    import gymnasium as gym
-    from gymnasium import spaces
-    _Base = gym.Env
-except ModuleNotFoundError:  # pragma: no cover
-    gym = None
-    spaces = None
-    _Base = object
+import gymnasium as gym
+from gymnasium import spaces
+_Base = gym.Env
+
 
 
 def _build_action_names(consumers: tuple) -> list[str]:
@@ -65,13 +18,6 @@ def _build_action_names(consumers: tuple) -> list[str]:
 
 
 class GridThiefEnvL3(_Base):
-    """Level-3 Energy Thief: continuous flows, large network, hidden suspicion.
-
-    The observation is a continuous vector; the per-line suspicion that drives the
-    alarm is part of the true state but is NOT observed -- only aggregate statistics
-    are. Actions are discrete (skim/overdraw each line, or lie-low), so the
-    environment plugs into a DQN.
-    """
 
     metadata = {"render_modes": ["ansi"]}
 
@@ -100,7 +46,7 @@ class GridThiefEnvL3(_Base):
         self.n_consumers = int(n_consumers)
         self.n_substations = int(n_substations)
         self.max_steps = int(max_steps)
-        self.surplus_cap = float(surplus_cap)   # display-only gauge normaliser
+        self.surplus_cap = float(surplus_cap)   
         self.base_sens = float(base_sens)
         self.base_divert = float(base_divert)
         self.shortfall_weight = float(shortfall_weight)
@@ -117,8 +63,6 @@ class GridThiefEnvL3(_Base):
         self.LIE_LOW = self.n_taps
         self.n_actions = self.n_taps + 1
 
-        # Consumers split into contiguous substation groups; later substations
-        # are watched more closely.
         self.substations = tuple(f"S{s+1}" for s in range(self.n_substations))
         self.substation_of = np.zeros(self.n_consumers, dtype=np.int64)
         base, rem, idx = divmod(self.n_consumers, self.n_substations) + (0,)

@@ -1,36 +1,9 @@
-"""Semi-gradient Q-learning with linear function approximation.
-
-Follows the lecture ``rlc`` implementation. The agent keeps **one weight vector
-per discrete action** and computes the action-value as the dot product of that
-weight vector with a **feature representation** of the state, produced by an
-externally-supplied feature extractor:
-
-    q(s, a) = w_a . x(s)
-
-Updates follow the semi-gradient rule (the target's dependence on w is ignored):
-
-    w_a <- w_a + alpha [ r + gamma max_a' q(s', a') - q(s, a) ] x(s)
-
-A *feature extractor* is any object exposing an integer ``n_features`` attribute
-and a ``__call__(state) -> np.ndarray`` mapping a state to a feature vector. This
-is where the *hand-crafted features* live.
-"""
-
 from __future__ import annotations
-
 from typing import Optional
-
 import numpy as np
 
 
 class LinearQLearningAgent:
-    """Semi-gradient Q-learning with linear function approximation.
-
-    Same agent protocol as the tabular agent (``select_action`` / ``update`` /
-    ``end_episode``), so it plugs into the same training loop; only the value is
-    a linear function of hand-crafted features rather than a table lookup.
-    """
-
     def __init__(
         self,
         feature_extractor,
