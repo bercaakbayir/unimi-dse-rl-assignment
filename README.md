@@ -36,8 +36,8 @@ All agents act ε-greedily with decaying ε (`energy_thief/agents/`):
 | | random | tabular Q | linear FA | DQN |
 |---|:---:|:---:|:---:|:---:|
 | **L1** | +131 | **+264 ± 8** | — | — |
-| **L2** | +76 | +117 | **+191** | — |
-| **L3** | +107 | — | +109 (≈ random) | **+151** |
+| **L2** | +76 | +117 | **+186 ± 14** | — |
+| **L3** | +107 | — | +109 | **+151 ± 9** |
 
 - **L1:** the space is small and fully observed — the table alone learns a near-optimal, readable policy (~2× random).
 - **L2:** the state explodes (curse of dimensionality; the table visits only 58.8% of states) — linear FA generalises across similar states and beats the strained table with ~650× fewer parameters.
