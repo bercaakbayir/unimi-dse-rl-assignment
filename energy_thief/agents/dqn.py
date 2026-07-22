@@ -18,7 +18,8 @@ class QNetwork(nn.Module):
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, n_actions),
-        )
+        ) 
+        # Q(s, .) = W3 · ReLU( W2 * ReLU( W1*φ(s) + b1 ) + b2 ) + b3
 
     def forward(self, state):
         return self.net(state)
@@ -29,16 +30,19 @@ Transition = namedtuple("Transition", ["state", "action", "reward", "next_state"
 
 class ReplayBuffer:
     def __init__(self, capacity: int, *, seed: Optional[int] = None):
-        self._buffer: deque = deque(maxlen=int(capacity))
+        self._buffer: deque = deque(maxlen=int(capacity)) # fixed size FIFO queue holding (s,a,r,s', done) 
         self._rng = random.Random(seed)
 
     def push(self, state, action, reward, next_state, done) -> None:
+        # store one transition, cast to consistent numeric types
         self._buffer.append(Transition(
             np.asarray(state, dtype=np.float32), int(action), float(reward),
             np.asarray(next_state, dtype=np.float32), bool(done),
         ))
 
     def sample(self, batch_size: int):
+        # draw a random minibatch of batch_size transitions and stack them into tensors: 
+        # B = {(s,a,r,s', di)} ∼ Uniform(buffer)
         batch = self._rng.sample(self._buffer, batch_size)
         states = torch.from_numpy(np.stack([t.state for t in batch]))
         actions = torch.tensor([t.action for t in batch], dtype=torch.int64)
@@ -68,11 +72,19 @@ class DQNAgent:
             torch.manual_seed(seed)
         self._rng = np.random.default_rng(seed)
 
-        self.q_net = QNetwork(n_state_features, n_actions, hidden_size)
-        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr)
-        self.target_net = copy.deepcopy(self.q_net)
+        self.q_net = QNetwork(n_state_features, n_actions, hidden_size) # q network
+        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr) # adam optimizer
+        self.target_net = copy.deepcopy(self.q_net) # target network Q_θ
         for p in self.target_net.parameters():
-            p.requires_grad_(False)
+            p.requires_grad_(False) # frozen — no gradients
+            
+        # 2 networks:
+        # online net : updated every step
+        # target net : a frozen copy, used to compute the learning target, synced only occasionally
+        
+        # Why two nets: in Q-learning the target r + gamma * maxQ(s') depends on the same weights you're updating. Chasing a moving target that shifts with every gradient step causes oscillation/divergence. Freezing theta gives a stable target for a while. This is the deep analog of a problem the linear agent had too, but tolerated because its updates were tiny.
+            
+        
         self.target_sync_every = int(target_sync_every)
         self._update_count = 0
 
@@ -86,6 +98,7 @@ class DQNAgent:
             return self.q_net(state_t).squeeze(0).numpy()
 
     def select_action(self, state, *, greedy: bool = False) -> int:
+        # a is Uniform(A) with probability epsilon, argmaxQ(s,a) with prob. 1-epsilon
         if not greedy and self._rng.random() < self.epsilon:
             return int(self._rng.integers(self.n_actions))
         q = self.q_values(state)
@@ -94,19 +107,23 @@ class DQNAgent:
     def update(self, state, action, reward, next_state, terminated, next_action=None) -> None:
         self.buffer.push(state, action, reward, next_state, terminated)
         if len(self.buffer) < self.min_buffer_size:
-            return
-        states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
-        q_sa = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+            return # if buffer has not yet accumulated 1000 transitions, do nothing. 
+        states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size) # sample minibatch (with size 64) of past transitions
+        q_sa = self.q_net(states).gather(1, actions.unsqueeze(1)).squeeze(1) #current estimates : run the online net on all states, then gather picks out the Q value of the action actually taken transitions
         with torch.no_grad():
             q_next_max = self.target_net(next_states).max(dim=1).values
-            target = rewards + self.gamma * (1.0 - dones) * q_next_max
-        loss = ((q_sa - target) ** 2).mean()
+            target = rewards + self.gamma * (1.0 - dones) * q_next_max # y = r + gamma * (1 - di) * maxQ(s',a'), 1 - d is termination check
+        loss = ((q_sa - target) ** 2).mean() 
+        
+        # gradient descent : 
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        
         self._update_count += 1
         if self._update_count % self.target_sync_every == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
     def end_episode(self) -> None:
+        # epsilon <- max(epsilon_min, epsilon * epsilon_decay)
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
