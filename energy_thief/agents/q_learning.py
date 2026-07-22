@@ -23,14 +23,12 @@ class QLearningAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
 
-        self.Q = np.zeros((n_states, n_actions))
+        self.Q = np.zeros((n_states, n_actions)) 
         self._rng = np.random.default_rng(seed)
 
     def select_action(self, state: int, *, greedy: bool = False) -> int:
-        # epsilon-greedy: explore with prob. epsilon, otherwise act greedily.
         if not greedy and self._rng.random() < self.epsilon:
             return int(self._rng.integers(self.n_actions))
-        # random tie-breaking avoids a systematic bias toward low-index actions.
         q = self.Q[state]
         return int(self._rng.choice(np.flatnonzero(q == q.max())))
 
@@ -40,20 +38,22 @@ class QLearningAgent:
         action: int,
         reward: float,
         next_state: int,
-        terminated: bool,
-        next_action: Optional[int] = None,  # unused: keeps the SARSA interface
-    ) -> None:
-        # Off-policy target uses max_a Q(s', a): the greedy value regardless of the (exploratory) action actually taken next. No bootstrap on a terminal transition, since there is no future return.
-        bootstrap = 0.0 if terminated else self.Q[next_state].max()
-        td_target = reward + self.gamma * bootstrap
-        self.Q[state, action] += self.alpha * (td_target - self.Q[state, action])
+        terminated: bool) -> None:
+        bootstrap = 0.0 if terminated else self.Q[next_state].max() # boostrap = 0 if terminated, maxQ(s',a) otherwise
+        td_target = reward + self.gamma * bootstrap # y - r + gamma * boostrap
+        self.Q[state, action] += self.alpha * (td_target - self.Q[state, action]) # Q <- Q + alpha * (y - Q)
+        
+        # Q(s,a) <- Q(s,a) + alpha * (r + gamma * maxQ(s', a') - Q(s,a))
 
     def end_episode(self) -> None:
-        # Anneal exploration toward exploitation as the estimates improve.
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        #epsilon <- max(epsilon_min, epsilon * epsilon_decay)
 
     def greedy_policy(self) -> np.ndarray:
+        # pi(s,a) = argmaxQ(s,a)
         return self.Q.argmax(axis=1)
+    
 
     def state_values(self) -> np.ndarray:
+        # V(s,a) = maxQ(s,a)
         return self.Q.max(axis=1)
