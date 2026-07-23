@@ -1,6 +1,6 @@
-# The Energy Thief (VFA-4)
+# The Energy Thief
 
-Reinforcement Learning final project — UniMI Data Science & Economics (AA 2025-26).
+Reinforcement Learning final project — UniMI Data Science & Economics (AA 2025-26). Project Code : VFA-4
 
 ## Scenario
 
@@ -31,7 +31,7 @@ All agents act ε-greedily with decaying ε (`energy_thief/agents/`):
 - **DQN** (L3) — neural $Q(s,a;\theta)$ with replay buffer, target network, and a frame-stack of the last 3 observations to infer the hidden suspicion from history.
 - **Random policy** — baseline at every level.
 
-## Results (greedy return, MWh; 5 seeds, DQN 3 seeds)
+## Results 
 
 | | random | tabular Q | linear FA | DQN |
 |---|:---:|:---:|:---:|:---:|
