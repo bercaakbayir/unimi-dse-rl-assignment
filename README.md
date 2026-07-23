@@ -8,7 +8,7 @@ A thief on a **power-grid network** (plant → substations → consumers) steals
 redirecting flow off the consumer lines. Each step it can **skim** a line's slack (safe),
 **overdraw** into delivered demand (more energy, riskier), or **lie low**. A monitoring
 system may raise an **alarm**: the thief steals nothing that step and is **locked out**
-for a few steps — getting caught costs future stealing time, not the haul already taken.
+for a few steps getting caught costs future stealing time, not the haul already taken.
 The reward is the energy stolen each step, so the return is the **total energy stolen
 over the shift**.
 
