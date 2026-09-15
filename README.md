@@ -27,9 +27,12 @@ One parameterized environment at three complexity levels (`energy_thief/envs/`):
 All agents act ε-greedily with decaying ε (`energy_thief/agents/`):
 
 - **Tabular Q-learning** (L1, L2) — off-policy TD control on a Q-table.
-- **Linear FA** (L2, L3) — semi-gradient Q-learning, $q(s,a)=\mathbf{w}_a^\top\mathbf{x}(s)$ on hand-crafted features (bias, lock-out, phase one-hot, per-line suspicion & slack).
-- **DQN** (L3) — neural $Q(s,a;\theta)$ with replay buffer, target network, and a frame-stack of the last 3 observations to infer the hidden suspicion from history.
-- **Random policy** — baseline at every level.
+- **Linear FA** (L1, L2, L3) — semi-gradient Q-learning, $q(s,a)=\mathbf{w}_a^\top\mathbf{x}(s)$ on hand-crafted features (bias, lock-out, phase one-hot, per-line suspicion and slack; raw observation at L3).
+- **DQN** (L2, L3) — neural $Q(s,a;\theta)$ with experience replay and a target network, on the same input as linear FA.
+- **Skim-max-slack rule** — hand-written baseline at every level: always skim the line with the most visible slack.
+- **Random policy** — floor at every level.
+
+Agents follow the reference implementations of the course `rlc` package (lectures 1, 3, 5); the environments and experiments are original.
 
 ## Results 
 
@@ -39,8 +42,8 @@ All agents act ε-greedily with decaying ε (`energy_thief/agents/`):
 | **L2** | 76 | 177 | **109 ± 22** | **135 ± 25** | **176 ± 16** |
 | **L3** | +107 | 187 | — | **155 ± 13** | **+173 ± 10** |
 
-- **L1:** the space is small and fully observed — the table alone learns a near-optimal, readable policy (~2× random).
-- **L2:** the state explodes (curse of dimensionality; the table visits only 58.8% of states) — linear FA generalises across similar states and beats the strained table with ~650× fewer parameters.
-- **L3:** continuous and partially observed — the value depends on the hidden suspicion, so linear FA over aggregate observations sits at random; only the history-aware **DQN** recovers a working policy.
+- **L1:** small and fully observed; both the table and linear FA come within a few percent of the hand-written rule. The table is preferred for readability, not return.
+- **L2:** 11,664 states; the table visits 57% of them and its policy degrades during training. Linear FA generalises with 234 weights but stops 40 MWh short of the rule at this budget; DQN on the same features matches the rule.
+- **L3:** continuous observation, per-line suspicion hidden. Linear FA trains only with a reduced discount (γ = 0.9); DQN trains stably at γ = 0.99 and gives the best learned policy. Neither exceeds the rule, which ignores suspicion — the hidden state is not the binding constraint.
 
 Details, full MDP definitions, and discussion: `notebooks/level-{1,2,3}.ipynb` (run from the repo root).
