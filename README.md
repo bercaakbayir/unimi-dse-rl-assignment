@@ -44,10 +44,10 @@ Agents follow the reference implementations of the course `rlc` package (lecture
 ## Results 
 
 | | random | heuristic | tabular Q | linear FA | DQN |
-|---|:---:|:---:|:---:|:---:|
-| **L1** | 131 | 279 | **264 ± 8** | **277 ± 5** | — |
-| **L2** | 76 | 177 | **109 ± 22** | **135 ± 25** | **176 ± 16** |
-| **L3** | +107 | 187 | — | **155 ± 13** | **+173 ± 10** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **L1** | 131 | 279 | 264 ± 8 | **277 ± 5** | — |
+| **L2** | 76 | 177 | 109 ± 22 | 135 ± 25 | **176 ± 16** |
+| **L3** | 107 | 187 | — | 155 ± 13 | **173 ± 10** |
 
 - **L1:** small and fully observed; both the table and linear FA come within a few percent of the hand-written rule. The table is preferred for readability, not return.
 - **L2:** 11,664 states; the table visits 57% of them and its policy degrades during training. Linear FA generalises with 234 weights but stops 40 MWh short of the rule at this budget; DQN on the same features matches the rule.
