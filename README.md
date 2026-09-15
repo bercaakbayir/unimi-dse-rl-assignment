@@ -4,13 +4,20 @@ Reinforcement Learning final project — UniMI Data Science & Economics (AA 2025
 
 ## Scenario
 
-A thief on a **power-grid network** (plant → substations → consumers) steals energy by
-redirecting flow off the consumer lines. Each step it can **skim** a line's slack (safe),
-**overdraw** into delivered demand (more energy, riskier), or **lie low**. A monitoring
-system may raise an **alarm**: the thief steals nothing that step and is **locked out**
-for a few steps getting caught costs future stealing time, not the haul already taken.
-The reward is the energy stolen each step, so the return is the **total energy stolen
-over the shift**.
+A thief operates on a **power-grid network** (plant → substations → consumers) and steals energy by
+redirecting flow off the consumer lines. At each step the thief can **skim** a line's slack (the
+unused margin, safe), **overdraw** into delivered demand (more energy, riskier), or **lie low**. A
+monitoring system may raise an **alarm** with a probability that grows with how aggressively the
+thief is operating and, at higher levels, with how often the same line has been tapped. When an
+alarm fires the thief steals nothing that step and is **locked out** for a few steps.
+
+The reward is the energy stolen each step, so the return is the **total energy stolen over the
+shift**.
+
+The project description has an alarm reset the accumulated surplus. Here an alarm instead locks the
+thief out and the haul is kept. This makes the reward dense (energy stolen per step) rather than
+dependent on when the last alarm fell, while preserving the same trade-off: aggression raises the
+alarm probability, and an alarm costs future stealing time.
 
 ## Environments
 
